@@ -1,0 +1,22 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: drools-api
+
+  datasource:
+    url: jdbc:snowflake://<account>.snowflakecomputing.com/?db=...&schema=...
+    user: YOUR_USERNAME
+    private-key-file: /path/to/rsa_key.p8
+    private-key-password: your_key_password
+
+  jpa:
+    show-sql: true
+    hibernate:
+      ddl-auto: none
+
+logging:
+  level:
+    root: INFO
+    com.example.droolsapi: DEBUG

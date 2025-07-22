@@ -1,0 +1,6 @@
+rule "Sample Rule"
+when
+  eval(true)
+then
+  System.out.println("Sample rule fired");
+end
