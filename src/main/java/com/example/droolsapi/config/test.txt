@@ -1,93 +1,142 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 
 export default function Page() {
   const [projects, setProjects] = useState<string[]>([]);
   const [rules, setRules] = useState<string[]>([]);
   const [selectedProject, setSelectedProject] = useState('');
-  const [selectedRule, setSelectedRule] = useState('');
+  const [selectedRules, setSelectedRules] = useState<string[]>([]);
 
-  // Fetch projects on page load
   useEffect(() => {
     fetch('http://127.0.0.1:8000/get-projects')
       .then((res) => res.json())
       .then((data) => setProjects(data))
-      .catch((err) => console.error('❌ Failed to fetch projects:', err));
+      .catch((err) => console.error('❌ Failed to load projects:', err));
   }, []);
 
-  // Fetch rules when project changes
   useEffect(() => {
     if (selectedProject) {
       fetch(`http://127.0.0.1:8000/get-rules?project=${selectedProject}`)
         .then((res) => res.json())
         .then((data) => setRules(data))
-        .catch((err) => console.error('❌ Failed to fetch rules:', err));
-    } else {
-      setRules([]); // Clear rules when no project is selected
+        .catch((err) => console.error('❌ Failed to load rules:', err));
     }
   }, [selectedProject]);
 
-  // Handlers
-  const handleProjectChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    setSelectedProject(e.target.value);
-    setSelectedRule(''); // Reset rule selection
-  };
+  const handleAction = async (action: string) => {
+    try {
+      const payload = {
+        project: selectedProject,
+        rules: selectedRules,
+      };
 
-  const handleRuleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    setSelectedRule(e.target.value);
+      let endpoint = '';
+
+      switch (action) {
+        case 'MOCK_RUN':
+          endpoint = 'http://127.0.0.1:8000/mock-run';
+          break;
+        case 'BUILD':
+          endpoint = 'http://127.0.0.1:8000/build';
+          break;
+        case 'EXECUTE':
+          endpoint = 'http://127.0.0.1:8000/execute';
+          break;
+        case 'BUILD_EXECUTE':
+          endpoint = 'http://127.0.0.1:8000/build-execute';
+          break;
+        default:
+          console.error('Unknown action:', action);
+          return;
+      }
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (response.ok) {
+        console.log(`✅ ${action} request successful`);
+      } else {
+        console.error(`❌ ${action} request failed`);
+      }
+    } catch (err) {
+      console.error(`❌ Error calling ${action} endpoint:`, err);
+    }
   };
 
   return (
-    <div className="flex justify-center items-center min-h-screen bg-gray-100">
-      <div className="bg-white p-8 rounded shadow-md w-full max-w-md">
-        <h1 className="text-2xl font-bold text-center mb-6">
-          eVisor - Drools Rule Engine
-        </h1>
+    <div className="flex flex-col items-center mt-12">
+      <h1 className="text-2xl font-bold mb-6">Build Rule Engine</h1>
 
-        <div className="mb-4">
-          <label className="block text-sm font-medium mb-1">Select Project</label>
-          <select
-            className="w-full p-2 border border-gray-300 rounded"
-            value={selectedProject}
-            onChange={handleProjectChange}
-          >
-            <option value="">-- Choose Project --</option>
-            {projects.map((proj) => (
-              <option key={proj} value={proj}>{proj}</option>
-            ))}
-          </select>
-        </div>
+      {/* Project dropdown */}
+      <div className="mb-4 w-80">
+        <label className="block mb-1 font-medium">Select Project</label>
+        <select
+          className="w-full border p-2 rounded"
+          value={selectedProject}
+          onChange={(e) => {
+            setSelectedProject(e.target.value);
+            setSelectedRules([]);
+          }}
+        >
+          <option value="">-- Choose Project --</option>
+          {projects.map((proj) => (
+            <option key={proj} value={proj}>{proj}</option>
+          ))}
+        </select>
+      </div>
 
-        <div className="mb-6">
-          <label className="block text-sm font-medium mb-1">Select Rule</label>
-          <select
-            className="w-full p-2 border border-gray-300 rounded"
-            value={selectedRule}
-            onChange={handleRuleChange}
-            disabled={!selectedProject}
-          >
-            <option value="">-- Choose Rule --</option>
-            {rules.map((rule) => (
-              <option key={rule} value={rule}>{rule}</option>
-            ))}
-          </select>
-        </div>
+      {/* Rule multi-select dropdown */}
+      <div className="mb-6 w-80">
+        <label className="block mb-1 font-medium">Select Rule(s)</label>
+        <select
+          multiple
+          className="w-full border p-2 rounded h-32"
+          value={selectedRules}
+          onChange={(e) =>
+            setSelectedRules(
+              Array.from(e.target.selectedOptions, (option) => option.value)
+            )
+          }
+          disabled={!rules.length}
+        >
+          {rules.map((rule) => (
+            <option key={rule} value={rule}>
+              {rule}
+            </option>
+          ))}
+        </select>
+      </div>
 
-        <div className="grid grid-cols-2 gap-3">
-          <button className="bg-gray-800 text-white py-2 px-4 rounded hover:bg-gray-700">
-            MOCK_RUN
-          </button>
-          <button className="bg-gray-800 text-white py-2 px-4 rounded hover:bg-gray-700">
-            BUILD
-          </button>
-          <button className="bg-gray-800 text-white py-2 px-4 rounded hover:bg-gray-700">
-            EXECUTE
-          </button>
-          <button className="bg-gray-800 text-white py-2 px-4 rounded hover:bg-gray-700">
-            BUILD_EXECUTE
-          </button>
-        </div>
+      {/* Action buttons */}
+      <div className="grid grid-cols-2 gap-4 w-80">
+        <button
+          className="bg-gray-800 text-white p-2 rounded"
+          onClick={() => handleAction('MOCK_RUN')}
+        >
+          MOCK_RUN
+        </button>
+        <button
+          className="bg-gray-800 text-white p-2 rounded"
+          onClick={() => handleAction('BUILD')}
+        >
+          BUILD
+        </button>
+        <button
+          className="bg-gray-800 text-white p-2 rounded"
+          onClick={() => handleAction('EXECUTE')}
+        >
+          EXECUTE
+        </button>
+        <button
+          className="bg-gray-800 text-white p-2 rounded"
+          onClick={() => handleAction('BUILD_EXECUTE')}
+        >
+          BUILD_EXECUTE
+        </button>
       </div>
     </div>
   );
