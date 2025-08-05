@@ -1,75 +1,89 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 
 export default function Page() {
+  const [projects, setProjects] = useState<string[]>([]);
+  const [rules, setRules] = useState<string[]>([]);
   const [selectedProject, setSelectedProject] = useState('');
   const [selectedRule, setSelectedRule] = useState('');
 
-  const projects = ['CommonDataObject'];
-  const rules = ['Rule1', 'Rule2', 'Rule3']; // Replace with dynamic values later
+  useEffect(() => {
+    fetch('/api/projects')
+      .then((res) => res.json())
+      .then((data) => setProjects(data))
+      .catch((err) => console.error('Failed to fetch projects', err));
+  }, []);
+
+  useEffect(() => {
+    if (selectedProject) {
+      fetch(`/api/rules?project=${selectedProject}`)
+        .then((res) => res.json())
+        .then((data) => setRules(data))
+        .catch((err) => console.error('Failed to fetch rules', err));
+    }
+  }, [selectedProject]);
 
   const handleClick = (action: string) => {
     console.log(`${action} triggered for ${selectedProject} and ${selectedRule}`);
+    // You can now call your backend API here
   };
 
   return (
-    <div className="min-h-screen bg-gray-100 p-8">
-      <div className="max-w-md mx-auto bg-white rounded-lg shadow-md p-6 space-y-6">
-        <div>
-          <label className="block text-sm font-semibold text-gray-700 mb-1">Select Project</label>
-          <select
-            value={selectedProject}
-            onChange={(e) => setSelectedProject(e.target.value)}
-            className="w-full px-4 py-2 border border-gray-300 rounded"
-          >
-            <option value="">Choose a project</option>
-            {projects.map((proj) => (
-              <option key={proj} value={proj}>{proj}</option>
-            ))}
-          </select>
-        </div>
+    <div className="bg-white p-8 rounded-lg shadow-md w-full max-w-md space-y-6">
+      <div>
+        <label className="block text-sm font-semibold text-gray-700 mb-1">Select Project</label>
+        <select
+          value={selectedProject}
+          onChange={(e) => setSelectedProject(e.target.value)}
+          className="w-full px-4 py-2 border border-gray-300 rounded"
+        >
+          <option value="">Choose a project</option>
+          {projects.map((proj) => (
+            <option key={proj} value={proj}>{proj}</option>
+          ))}
+        </select>
+      </div>
 
-        <div>
-          <label className="block text-sm font-semibold text-gray-700 mb-1">Select Rule</label>
-          <select
-            value={selectedRule}
-            onChange={(e) => setSelectedRule(e.target.value)}
-            className="w-full px-4 py-2 border border-gray-300 rounded"
-          >
-            <option value="">Choose options</option>
-            {rules.map((rule) => (
-              <option key={rule} value={rule}>{rule}</option>
-            ))}
-          </select>
-        </div>
+      <div>
+        <label className="block text-sm font-semibold text-gray-700 mb-1">Select Rule</label>
+        <select
+          value={selectedRule}
+          onChange={(e) => setSelectedRule(e.target.value)}
+          className="w-full px-4 py-2 border border-gray-300 rounded"
+        >
+          <option value="">Choose options</option>
+          {rules.map((rule) => (
+            <option key={rule} value={rule}>{rule}</option>
+          ))}
+        </select>
+      </div>
 
-        <div className="grid grid-cols-2 gap-4">
-          <button
-            onClick={() => handleClick('MOCK_RUN')}
-            className="bg-gray-800 text-white px-4 py-2 rounded hover:bg-gray-700"
-          >
-            MOCK_RUN
-          </button>
-          <button
-            onClick={() => handleClick('BUILD')}
-            className="bg-gray-800 text-white px-4 py-2 rounded hover:bg-gray-700"
-          >
-            BUILD
-          </button>
-          <button
-            onClick={() => handleClick('EXECUTE')}
-            className="bg-gray-800 text-white px-4 py-2 rounded hover:bg-gray-700"
-          >
-            EXECUTE
-          </button>
-          <button
-            onClick={() => handleClick('BUILD_EXECUTE')}
-            className="bg-gray-800 text-white px-4 py-2 rounded hover:bg-gray-700"
-          >
-            BUILD_EXECUTE
-          </button>
-        </div>
+      <div className="grid grid-cols-2 gap-4">
+        <button
+          onClick={() => handleClick('MOCK_RUN')}
+          className="bg-gray-800 text-white px-4 py-2 rounded hover:bg-gray-700"
+        >
+          MOCK_RUN
+        </button>
+        <button
+          onClick={() => handleClick('BUILD')}
+          className="bg-gray-800 text-white px-4 py-2 rounded hover:bg-gray-700"
+        >
+          BUILD
+        </button>
+        <button
+          onClick={() => handleClick('EXECUTE')}
+          className="bg-gray-800 text-white px-4 py-2 rounded hover:bg-gray-700"
+        >
+          EXECUTE
+        </button>
+        <button
+          onClick={() => handleClick('BUILD_EXECUTE')}
+          className="bg-gray-800 text-white px-4 py-2 rounded hover:bg-gray-700"
+        >
+          BUILD_EXECUTE
+        </button>
       </div>
     </div>
   );
