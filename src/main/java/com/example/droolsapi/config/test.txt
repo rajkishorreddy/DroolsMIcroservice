@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 export default function Page() {
   const [projects, setProjects] = useState<string[]>([]);
@@ -8,82 +8,86 @@ export default function Page() {
   const [selectedProject, setSelectedProject] = useState('');
   const [selectedRule, setSelectedRule] = useState('');
 
+  // Fetch projects on page load
   useEffect(() => {
-    fetch('/api/projects')
+    fetch('http://127.0.0.1:8000/get-projects')
       .then((res) => res.json())
       .then((data) => setProjects(data))
-      .catch((err) => console.error('Failed to fetch projects', err));
+      .catch((err) => console.error('❌ Failed to fetch projects:', err));
   }, []);
 
+  // Fetch rules when project changes
   useEffect(() => {
     if (selectedProject) {
-      fetch(`/api/rules?project=${selectedProject}`)
+      fetch(`http://127.0.0.1:8000/get-rules?project=${selectedProject}`)
         .then((res) => res.json())
         .then((data) => setRules(data))
-        .catch((err) => console.error('Failed to fetch rules', err));
+        .catch((err) => console.error('❌ Failed to fetch rules:', err));
+    } else {
+      setRules([]); // Clear rules when no project is selected
     }
   }, [selectedProject]);
 
-  const handleClick = (action: string) => {
-    console.log(`${action} triggered for ${selectedProject} and ${selectedRule}`);
-    // You can now call your backend API here
+  // Handlers
+  const handleProjectChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    setSelectedProject(e.target.value);
+    setSelectedRule(''); // Reset rule selection
+  };
+
+  const handleRuleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    setSelectedRule(e.target.value);
   };
 
   return (
-    <div className="bg-white p-8 rounded-lg shadow-md w-full max-w-md space-y-6">
-      <div>
-        <label className="block text-sm font-semibold text-gray-700 mb-1">Select Project</label>
-        <select
-          value={selectedProject}
-          onChange={(e) => setSelectedProject(e.target.value)}
-          className="w-full px-4 py-2 border border-gray-300 rounded"
-        >
-          <option value="">Choose a project</option>
-          {projects.map((proj) => (
-            <option key={proj} value={proj}>{proj}</option>
-          ))}
-        </select>
-      </div>
+    <div className="flex justify-center items-center min-h-screen bg-gray-100">
+      <div className="bg-white p-8 rounded shadow-md w-full max-w-md">
+        <h1 className="text-2xl font-bold text-center mb-6">
+          eVisor - Drools Rule Engine
+        </h1>
 
-      <div>
-        <label className="block text-sm font-semibold text-gray-700 mb-1">Select Rule</label>
-        <select
-          value={selectedRule}
-          onChange={(e) => setSelectedRule(e.target.value)}
-          className="w-full px-4 py-2 border border-gray-300 rounded"
-        >
-          <option value="">Choose options</option>
-          {rules.map((rule) => (
-            <option key={rule} value={rule}>{rule}</option>
-          ))}
-        </select>
-      </div>
+        <div className="mb-4">
+          <label className="block text-sm font-medium mb-1">Select Project</label>
+          <select
+            className="w-full p-2 border border-gray-300 rounded"
+            value={selectedProject}
+            onChange={handleProjectChange}
+          >
+            <option value="">-- Choose Project --</option>
+            {projects.map((proj) => (
+              <option key={proj} value={proj}>{proj}</option>
+            ))}
+          </select>
+        </div>
 
-      <div className="grid grid-cols-2 gap-4">
-        <button
-          onClick={() => handleClick('MOCK_RUN')}
-          className="bg-gray-800 text-white px-4 py-2 rounded hover:bg-gray-700"
-        >
-          MOCK_RUN
-        </button>
-        <button
-          onClick={() => handleClick('BUILD')}
-          className="bg-gray-800 text-white px-4 py-2 rounded hover:bg-gray-700"
-        >
-          BUILD
-        </button>
-        <button
-          onClick={() => handleClick('EXECUTE')}
-          className="bg-gray-800 text-white px-4 py-2 rounded hover:bg-gray-700"
-        >
-          EXECUTE
-        </button>
-        <button
-          onClick={() => handleClick('BUILD_EXECUTE')}
-          className="bg-gray-800 text-white px-4 py-2 rounded hover:bg-gray-700"
-        >
-          BUILD_EXECUTE
-        </button>
+        <div className="mb-6">
+          <label className="block text-sm font-medium mb-1">Select Rule</label>
+          <select
+            className="w-full p-2 border border-gray-300 rounded"
+            value={selectedRule}
+            onChange={handleRuleChange}
+            disabled={!selectedProject}
+          >
+            <option value="">-- Choose Rule --</option>
+            {rules.map((rule) => (
+              <option key={rule} value={rule}>{rule}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <button className="bg-gray-800 text-white py-2 px-4 rounded hover:bg-gray-700">
+            MOCK_RUN
+          </button>
+          <button className="bg-gray-800 text-white py-2 px-4 rounded hover:bg-gray-700">
+            BUILD
+          </button>
+          <button className="bg-gray-800 text-white py-2 px-4 rounded hover:bg-gray-700">
+            EXECUTE
+          </button>
+          <button className="bg-gray-800 text-white py-2 px-4 rounded hover:bg-gray-700">
+            BUILD_EXECUTE
+          </button>
+        </div>
       </div>
     </div>
   );
