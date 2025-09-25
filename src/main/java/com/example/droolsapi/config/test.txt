@@ -1,106 +1,15 @@
-# DRIVER-ONLY sanity test: build two facts with EXACT types, fire rules, print statuses
-from datetime import date, timedelta
+import zipfile
 
-jvm   = spark._jvm
+jar_paths = [
+    "/dbfs/FileStore/jars/CommonDataObject-1.0.jar",
+    "/dbfs/FileStore/jars/drools-utils-0.0.1-FAT.jar"
+]
 
-# Java classes
-CDM    = jvm.CommonDataObject.CommonDataModel
-RSLT   = jvm.CommonDataObject.CommonDataResultSet
-Config = jvm.handlers.MyDroolsConfig          # <-- your class lives in package 'handlers'
-JDate  = jvm.java.sql.Date
-
-# Boxed Java types (critical for constructor matching)
-JInt   = jvm.java.lang.Integer
-JDbl   = jvm.java.lang.Double
-JFloat = jvm.java.lang.Float
-
-# KieSession
-ks = Config.kieContainer().newKieSession()
-
-# ----------------------
-# Fact 1: SCORE fact (matches your rule: mem_name="INDV_SCOR_FACT", scor_typ_cd="FUT_RSK_IN", scor_val>=3.0)
-# Constructor order (and types):
-#  indv_id:Int, elem_nbr:Int, elem_qty:Double, age:Int, mem_name:String,
-#  elem_dt_1:Date, elem_dt_2:Date, scor_typ_cd:String, scor_val:Float, prg_srvc_id:Int,
-#  trm_dt:Date, eff_dt:Date, dft_dt:Date, st_abbr_cd:String, optum_seg_id:String,
-#  id_run_dt:Date, outbound_file_id:Int, scen_rule_cd:String, dob:Date, effective_date:Date,
-#  end_date:Date, med_dx_of_interest:String, scenario_cd:String, next_effective_date:Date,
-#  grace_period:Int, min_eff_date:Date, max_end_date:Date, final_end_date:Date,
-#  adt_chief_complaint:String, elem_sup:String, continuity:String, med_cov:Float, rel_iprnt_risk_12_mo_nbr:Float
-score = CDM(
-    JInt(1),           # indv_id
-    JInt(999),         # elem_nbr
-    JDbl(1.0),         # elem_qty
-    JInt(35),          # age
-    "INDV_SCOR_FACT",  # mem_name
-    None,              # elem_dt_1
-    None,              # elem_dt_2
-    "FUT_RSK_IN",      # scor_typ_cd
-    JFloat(3.5),       # scor_val (Float!)
-    JInt(123),         # prg_srvc_id
-    None, None, None,  # trm_dt, eff_dt, dft_dt
-    "TX",              # st_abbr_cd
-    "SEG1",            # optum_seg_id
-    None,              # id_run_dt
-    JInt(1),           # outbound_file_id
-    "RULECD",          # scen_rule_cd
-    None, None, None,  # dob, effective_date, end_date
-    None,              # med_dx_of_interest
-    "SCN",             # scenario_cd
-    None,              # next_effective_date
-    JInt(0),           # grace_period
-    None, None, None,  # min_eff_date, max_end_date, final_end_date
-    None,              # adt_chief_complaint
-    None,              # elem_sup
-    None,              # continuity
-    JFloat(0.0),       # med_cov (Float!)
-    JFloat(0.0)        # rel_iprnt_risk_12_mo_nbr (Float!)
-)
-
-# ----------------------
-# Fact 2: ELEMENT fact (mem_name="INDV_ELEMENTS_LAB", elem_nbr=478, elem_dt_1 within 90-day window per your getter)
-target = (date.today() - timedelta(days=60)).isoformat()  # inside [now-133, now-43]
-elem = CDM(
-    JInt(1),
-    JInt(478),
-    JDbl(1.0),
-    JInt(35),
-    "INDV_ELEMENTS_LAB",
-    JDate.valueOf(target),  # elem_dt_1 (java.sql.Date)
-    None,
-    None,                   # scor_typ_cd
-    JFloat(0.0),            # scor_val (Float)
-    JInt(123),              # prg_srvc_id
-    None, None, None,
-    "TX",
-    "SEG1",
-    None,
-    JInt(2),                # outbound_file_id
-    "RULECD",
-    None, None, None,
-    None,
-    "SCN",
-    None,
-    JInt(0),
-    None, None, None,
-    None,
-    None,
-    None,
-    JFloat(0.0),
-    JFloat(0.0)
-)
-
-ks.insert(score)
-ks.insert(elem)
-ks.fireAllRules()
-
-# collect CommonDataResultSet statuses
-out = []
-it = ks.getObjects().iterator()
-while it.hasNext():
-    o = it.next()
-    if o.getClass().getName() == "CommonDataObject.CommonDataResultSet":
-        out.append(o.getStatus())
-ks.dispose()
-
-print("Statuses:", out)
+for p in jar_paths:
+    try:
+        with zipfile.ZipFile(p) as z:
+            hits = [n for n in z.namelist() if n.endswith("MyDroolsConfig.class")]
+            print("\nJAR:", p)
+            print("Matches:", hits if hits else "(none)")
+    except Exception as e:
+        print("Error reading", p, e)
