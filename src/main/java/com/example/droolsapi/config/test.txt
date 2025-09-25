@@ -1,209 +1,67 @@
-import os
-import time
-import uuid
-import concurrent.futures as cf
-from contextlib import contextmanager
+from pyspark.sql import Row
+from pyspark import SparkContext
+from datetime import date, timedelta
 
-import snowflake.connector
+def run_test_partition(iter_rows):
+    sc  = SparkContext.getOrCreate()
+    jvm = sc._jvm
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Connection (use env vars or paste directly)
-# ──────────────────────────────────────────────────────────────────────────────
-SF_ACCOUNT   = os.getenv("SF_ACCOUNT",   "<your_account_name>")         # e.g. "xy12345.ap-south-1"
-SF_USER      = os.getenv("SF_USER",      "<your_user>")
-SF_ROLE      = os.getenv("SF_ROLE",      "<your_role>")
-SF_DATABASE  = os.getenv("SF_DATABASE",  "<your_database>")
-SF_SCHEMA    = os.getenv("SF_SCHEMA",    "<your_schema>")
-SF_WAREHOUSE = os.getenv("SF_WAREHOUSE", "<your_multi_cluster_wh>")     # enable MAX_CLUSTER_COUNT > 1
-# If using keypair auth:
-SF_PRIVATE_KEY_PATH = os.getenv("SF_PRIVATE_KEY_PATH")                  # optional
-SF_PRIVATE_KEY_PASSPHRASE = os.getenv("SF_PRIVATE_KEY_PASSPHRASE", "")
+    CDM    = jvm.CommonDataObject.CommonDataModel
+    Config = jvm.MyDroolsConfig
+    JDate  = jvm.java.sql.Date
 
-USE_KEYPAIR = bool(SF_PRIVATE_KEY_PATH)
+    ks = Config.kieContainer().newKieSession()
 
-# ──────────────────────────────────────────────────────────────────────────────
-# UDTF handler & column list (matches your screenshot)
-# ──────────────────────────────────────────────────────────────────────────────
-UDTF_FULL_NAME = "DROOLS.CommonDataModel"  # <db>.<schema> qualified if needed
-
-# Columns expected by the UDTF (order matters!)
-COLS = [
-    "indv_id","elem_nbr","elem_qty","age","mem_name",
-    "elem_dt_1","elem_dt_2","scor_typ_cd","scor_val","prc_srvc_id","trn_dt","eff_dt",
-    "ssn_dt_abbr_cd","optum_seq_id","id_run_dt","outbound_file_id","min_eff_date","dob",
-    "effective_date","end_date","med_dx_of_interest","scenario_cd","next_effective_date",
-    "grace_period","max_end_date","final_end_date","adh_chief_complaint","elem_sup",
-    "continuity","med_cov","rel_iptnrt_risk_12_mo_nbr"
-]
-
-# Destination table DDL (drop & create per shard)
-DEST_DDL_TEMPLATE = """
-DROP TABLE IF EXISTS {dest};
-CREATE TABLE {dest} (
-  indv_id        NUMBER,
-  rule_num       VARCHAR,
-  rule_flag      VARCHAR,
-  is_active      VARCHAR,
-  audit_creat_dt TIMESTAMP_NTZ
-);
-"""
-
-# Per-shard load SQL:
-# - Reads ONLY from the shard's source table (already split by hash)
-# - Calls the Java UDTF
-# - FLATTENs its VARIANT output (expects array/objects with ruleNum)
-# - Inserts into the per-shard destination
-INSERT_TEMPLATE = """
-INSERT INTO {dest} (indv_id, rule_num, rule_flag, is_active, audit_creat_dt)
-SELECT
-  s.indv_id,
-  f.value:ruleNum::STRING AS rule_num,
-  'TRUE'                   AS rule_flag,
-  'Y'                      AS is_active,
-  CURRENT_TIMESTAMP()      AS audit_creat_dt
-FROM {source} AS s,
-     LATERAL TABLE({udtf}({udtf_args})) AS ud,
-     LATERAL FLATTEN(input => ud.output) AS f;
-"""
-
-# Optional: small session tune-ups per connection
-SESSION_SETUP_SQL = f"""
-USE ROLE {SF_ROLE};
-USE WAREHOUSE {SF_WAREHOUSE};
-USE DATABASE {SF_DATABASE};
-USE SCHEMA {SF_SCHEMA};
-ALTER SESSION SET
-  QUERY_TAG = 'drools_udtf_sharded_load',
-  STATEMENT_TIMEOUT_IN_SECONDS = 0,               -- no statement timeout
-  CLIENT_SESSION_KEEP_ALIVE = TRUE;
-"""
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ──────────────────────────────────────────────────────────────────────────────
-@contextmanager
-def snowflake_cursor():
-    if USE_KEYPAIR:
-        with open(SF_PRIVATE_KEY_PATH, "rb") as f:
-            p_key = f.read()
-        ctx = snowflake.connector.connect(
-            account=SF_ACCOUNT,
-            user=SF_USER,
-            role=SF_ROLE,
-            warehouse=SF_WAREHOUSE,
-            database=SF_DATABASE,
-            schema=SF_SCHEMA,
-            private_key=p_key,
-            private_key_password=SF_PRIVATE_KEY_PASSPHRASE,
-            client_session_keep_alive=True,
-        )
-    else:
-        # Password auth fallback
-        ctx = snowflake.connector.connect(
-            account=SF_ACCOUNT,
-            user=SF_USER,
-            password=os.getenv("SF_PASSWORD", "<your_password>"),
-            role=SF_ROLE,
-            warehouse=SF_WAREHOUSE,
-            database=SF_DATABASE,
-            schema=SF_SCHEMA,
-            client_session_keep_alive=True,
-        )
-    try:
-        cur = ctx.cursor()
-        cur.execute(SESSION_SETUP_SQL)
-        yield cur
-    finally:
-        try:
-            cur.close()
-        finally:
-            ctx.close()
-
-
-def two_digit(n: int) -> str:
-    return f"{n:02d}"
-
-
-def build_udtf_args(alias: str = "s") -> str:
-    """
-    Build the ordered argument list to pass to the UDTF from the source alias.
-    """
-    return ", ".join(f"{alias}.{c}" for c in COLS)
-
-
-def load_shard(shard: int) -> dict:
-    """
-    Executes the whole pipeline for one shard:
-      - DROP & CREATE destination table
-      - INSERT via UDTF from shard source
-    Returns a small dict with stats/outcome.
-    """
-    start = time.time()
-    sfx = two_digit(shard)
-    source = f"ETL.ELEMENT_DATA_KIS_{sfx}"         # adjust DB/SCHEMA if different
-    dest   = f"ETL.STREAMLIT_RESULTS_KIS_{sfx}"
-
-    udtf_args = build_udtf_args("s")
-    ddl_sql   = DEST_DDL_TEMPLATE.format(dest=dest)
-    ins_sql   = INSERT_TEMPLATE.format(
-        dest=dest,
-        source=source,
-        udtf=UDTF_FULL_NAME,
-        udtf_args=udtf_args
+    # ---- build the two facts your rule needs ----
+    # 1) SCORE fact (mem_name == "INDV_SCOR_FACT", scor_typ_cd == "FUT_RSK_IN", scor_val >= 3.0)
+    score = CDM(
+        1, 999, 1.0, 35, "INDV_SCOR_FACT",
+        None, None,
+        "FUT_RSK_IN", 3.5, 123,
+        None, None, None,
+        "TX", "SEG1",
+        None, None,
+        "RULECD",
+        None, None, None,
+        None, "SCN",
+        None, 0,
+        None, None, None,
+        None, None, None, None,
+        0.0, 0.0
     )
 
-    rows_inserted = 0
-    with snowflake_cursor() as cur:
-        # Drop & create destination (fresh table per run, as requested)
-        for stmt in ddl_sql.strip().split(";"):
-            if stmt.strip():
-                cur.execute(stmt)
+    # 2) ELEMENT fact (mem_name == "INDV_ELEMENTS_LAB", elem_nbr == 478, elem_dt_1 within [now-133, now-43])
+    target_dt = date.today() - timedelta(days=60)  # inside the required window
+    elem = CDM(
+        1, 478, 1.0, 35, "INDV_ELEMENTS_LAB",
+        JDate.valueOf(target_dt.isoformat()),  # elem_dt_1 => correct java.sql.Date
+        None,
+        None, 0.0, 123,
+        None, None, None,
+        "TX", "SEG1",
+        None, None,
+        "RULECD",
+        None, None, None,
+        None, "SCN",
+        None, 0,
+        None, None, None,
+        None, None, None, None,
+        0.0, 0.0
+    )
 
-        # Insert
-        cur.execute(ins_sql)
-        rows_inserted = cur.rowcount if cur.rowcount is not None else 0
+    ks.insert(score)
+    ks.insert(elem)
+    ks.fireAllRules()
 
-    elapsed = time.time() - start
-    return {"shard": shard, "rows": rows_inserted, "seconds": round(elapsed, 2)}
+    out = []
+    it = ks.getObjects().iterator()
+    while it.hasNext():
+        obj = it.next()
+        if obj.getClass().getName() == "CommonDataObject.CommonDataResultSet":
+            out.append(Row(status=obj.getStatus()))
+    ks.dispose()
+    return iter(out)
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Main: run all 32 shards concurrently
-# ──────────────────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    t0 = time.time()
-    SHARDS = list(range(32))
-
-    # Tip: match max_workers to MAX_CLUSTER_COUNT on your warehouse if possible.
-    # If WH has MAX_CLUSTER_COUNT=10, using 10–16 workers is a good start.
-    MAX_WORKERS = 32
-
-    print(f"Starting parallel load for {len(SHARDS)} shards…")
-    results = []
-    errors = []
-
-    with cf.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = {ex.submit(load_shard, s): s for s in SHARDS}
-        for fut in cf.as_completed(futures):
-            s = futures[fut]
-            try:
-                res = fut.result()
-                results.append(res)
-                print(f"✓ Shard {s:02d} loaded {res['rows']} rows in {res['seconds']}s")
-            except Exception as e:
-                errors.append((s, e))
-                print(f"✗ Shard {s:02d} failed: {e}")
-
-    total_secs = round(time.time() - t0, 2)
-    total_rows = sum(r["rows"] for r in results)
-    print("\n──────── Summary ────────")
-    print(f"Shards succeeded: {len(results)}/{len(SHARDS)}")
-    print(f"Total rows inserted: {total_rows}")
-    print(f"Wall clock: {total_secs} seconds")
-    if errors:
-        print("Failures:")
-        for s, e in errors:
-            print(f"  - Shard {s:02d}: {e}")
-
-
-
+test_rdd = spark.sparkContext.parallelize([1], 1).mapPartitions(run_test_partition)
+df = spark.createDataFrame(test_rdd)
+df.show(truncate=False)
