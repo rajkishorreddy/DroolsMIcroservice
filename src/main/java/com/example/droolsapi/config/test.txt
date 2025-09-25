@@ -1,15 +1,57 @@
-import zipfile
+# Driver-only sanity test using reflection (works even if class is in default package)
+from datetime import date, timedelta
 
-jar_paths = [
-    "/dbfs/FileStore/jars/CommonDataObject-1.0.jar",
-    "/dbfs/FileStore/jars/drools-utils-0.0.1-FAT.jar"
-]
+gw  = spark.sparkContext._gateway
+jvm = gw.jvm
 
-for p in jar_paths:
-    try:
-        with zipfile.ZipFile(p) as z:
-            hits = [n for n in z.namelist() if n.endswith("MyDroolsConfig.class")]
-            print("\nJAR:", p)
-            print("Matches:", hits if hits else "(none)")
-    except Exception as e:
-        print("Error reading", p, e)
+# ---- call MyDroolsConfig.kieContainer() via reflection ----
+Cls = jvm.java.lang.Class.forName("MyDroolsConfig")  # default package
+emptyClassArr = gw.new_array(jvm.java.lang.Class, 0)
+emptyObjArr   = gw.new_array(jvm.java.lang.Object, 0)
+m = Cls.getDeclaredMethod("kieContainer", emptyClassArr)
+kc = m.invoke(None, emptyObjArr)                     # static method
+ks = kc.newKieSession()
+
+# ---- build two facts with EXACT boxed types ----
+CDM    = jvm.CommonDataObject.CommonDataModel
+JDate  = jvm.java.sql.Date
+JInt   = jvm.java.lang.Integer
+JDbl   = jvm.java.lang.Double
+JFloat = jvm.java.lang.Float
+
+# SCORE fact: mem_name='INDV_SCOR_FACT', scor_typ_cd='FUT_RSK_IN', scor_val>=3.0
+score = CDM(JInt(1), JInt(999), JDbl(1.0), JInt(35), "INDV_SCOR_FACT",
+            None, None, "FUT_RSK_IN", JFloat(3.5), JInt(123),
+            None, None, None, "TX", "SEG1",
+            None, JInt(1), "RULECD",
+            None, None, None, None, "SCN",
+            None, JInt(0),
+            None, None, None,
+            None, None, None,
+            JFloat(0.0), JFloat(0.0))
+
+# ELEMENT fact: mem_name='INDV_ELEMENTS_LAB', elem_nbr=478, elem_dt_1 inside 90d window
+target = (date.today() - timedelta(days=60)).isoformat()
+elem = CDM(JInt(1), JInt(478), JDbl(1.0), JInt(35), "INDV_ELEMENTS_LAB",
+           JDate.valueOf(target), None,
+           None, JFloat(0.0), JInt(123),
+           None, None, None, "TX", "SEG1",
+           None, JInt(2), "RULECD",
+           None, None, None, None, "SCN",
+           None, JInt(0),
+           None, None, None,
+           None, None, None,
+           JFloat(0.0), JFloat(0.0))
+
+ks.insert(score); ks.insert(elem)
+ks.fireAllRules()
+
+# collect CommonDataResultSet.status
+out = []
+it = ks.getObjects().iterator()
+while it.hasNext():
+    o = it.next()
+    if o.getClass().getName() == "CommonDataObject.CommonDataResultSet":
+        out.append(o.getStatus())
+ks.dispose()
+print("Statuses:", out)
