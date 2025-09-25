@@ -1,67 +1,43 @@
+# DRIVER-ONLY TEST (no mapPartitions)
 from pyspark.sql import Row
-from pyspark import SparkContext
+
+jvm = spark._jvm
+
+CDM    = jvm.CommonDataObject.CommonDataModel
+Config = jvm.MyDroolsConfig
+JDate  = jvm.java.sql.Date
 from datetime import date, timedelta
 
-def run_test_partition(iter_rows):
-    sc  = SparkContext.getOrCreate()
-    jvm = sc._jvm
+ks = Config.kieContainer().newKieSession()
 
-    CDM    = jvm.CommonDataObject.CommonDataModel
-    Config = jvm.MyDroolsConfig
-    JDate  = jvm.java.sql.Date
+# fact 1: score fact (matches your rule)
+score = CDM(1, 999, 1.0, 35, "INDV_SCOR_FACT",
+            None, None, "FUT_RSK_IN", 3.5, 123,
+            None, None, None, "TX", "SEG1",
+            None, None, "RULECD",
+            None, None, None, None, "SCN",
+            None, 0, None, None, None,
+            None, None, None, None, 0.0, 0.0)
 
-    ks = Config.kieContainer().newKieSession()
+# fact 2: element fact (elem_dt_1 within 90-day window used by your getter)
+target = date.today() - timedelta(days=60)
+elem = CDM(1, 478, 1.0, 35, "INDV_ELEMENTS_LAB",
+           JDate.valueOf(target.isoformat()), None,
+           None, 0.0, 123,
+           None, None, None, "TX", "SEG1",
+           None, None, "RULECD",
+           None, None, None, None, "SCN",
+           None, 0, None, None, None,
+           None, None, None, None, 0.0, 0.0)
 
-    # ---- build the two facts your rule needs ----
-    # 1) SCORE fact (mem_name == "INDV_SCOR_FACT", scor_typ_cd == "FUT_RSK_IN", scor_val >= 3.0)
-    score = CDM(
-        1, 999, 1.0, 35, "INDV_SCOR_FACT",
-        None, None,
-        "FUT_RSK_IN", 3.5, 123,
-        None, None, None,
-        "TX", "SEG1",
-        None, None,
-        "RULECD",
-        None, None, None,
-        None, "SCN",
-        None, 0,
-        None, None, None,
-        None, None, None, None,
-        0.0, 0.0
-    )
+ks.insert(score); ks.insert(elem)
+ks.fireAllRules()
 
-    # 2) ELEMENT fact (mem_name == "INDV_ELEMENTS_LAB", elem_nbr == 478, elem_dt_1 within [now-133, now-43])
-    target_dt = date.today() - timedelta(days=60)  # inside the required window
-    elem = CDM(
-        1, 478, 1.0, 35, "INDV_ELEMENTS_LAB",
-        JDate.valueOf(target_dt.isoformat()),  # elem_dt_1 => correct java.sql.Date
-        None,
-        None, 0.0, 123,
-        None, None, None,
-        "TX", "SEG1",
-        None, None,
-        "RULECD",
-        None, None, None,
-        None, "SCN",
-        None, 0,
-        None, None, None,
-        None, None, None, None,
-        0.0, 0.0
-    )
-
-    ks.insert(score)
-    ks.insert(elem)
-    ks.fireAllRules()
-
-    out = []
-    it = ks.getObjects().iterator()
-    while it.hasNext():
-        obj = it.next()
-        if obj.getClass().getName() == "CommonDataObject.CommonDataResultSet":
-            out.append(Row(status=obj.getStatus()))
-    ks.dispose()
-    return iter(out)
-
-test_rdd = spark.sparkContext.parallelize([1], 1).mapPartitions(run_test_partition)
-df = spark.createDataFrame(test_rdd)
-df.show(truncate=False)
+out = []
+it = ks.getObjects().iterator()
+while it.hasNext():
+    obj = it.next()
+    if obj.getClass().getName() == "CommonDataObject.CommonDataResultSet":
+        out.append(obj.getStatus())
+ks.dispose()
+print("Statuses:", out)
