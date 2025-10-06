@@ -68,3 +68,7 @@ kubectl -n $NS describe pod $NEWPOD | sed -n '/Events:/,$p'
 
 
 kubectl -n evisor-non-prod get secret <secret-name> -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d
+
+
+
+kubectl -n evisor-non-prod get pod <pod-name> -o jsonpath='{.spec.imagePullSecrets[*].name}{"\n"}'
