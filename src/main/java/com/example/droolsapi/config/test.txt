@@ -62,3 +62,9 @@ kubectl -n $NS get deploy $APP -o jsonpath='{.spec.template.spec.imagePullSecret
 # still failing? grab last events quickly
 NEWPOD=$(kubectl -n $NS get pod -l app=canonical-app -o jsonpath='{.items[-1:].metadata.name}')
 kubectl -n $NS describe pod $NEWPOD | sed -n '/Events:/,$p'
+
+
+
+
+
+kubectl -n evisor-non-prod get secret <secret-name> -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d
