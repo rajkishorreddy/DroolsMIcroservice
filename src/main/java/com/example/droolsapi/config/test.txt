@@ -1,94 +1,30 @@
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
-    <modelVersion>4.0.0</modelVersion>
+from datetime import date
 
-    <groupId>org.example</groupId>
-    <artifactId>drools-databricks</artifactId>
-    <version>1.0.0</version>
+gx = spark._jvm.org.example.drools.GenericExecutor()
 
-    <properties>
-        <maven.compiler.source>1.8</maven.compiler.source>
-        <maven.compiler.target>1.8</maven.compiler.target>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <drools.version>7.59.0.Final</drools.version>
-    </properties>
+# 1 test row to hit A1CIPRiskRule
+rows = [
+    (
+        1,              # indv_id
+        478,            # elem_nbr -> matches rule
+        1.0,            # elem_qty
+        45,             # age
+        "INDV_SCOR_FACT", # mem_name -> matches rule
+        date(2025,1,1), # elem_dt_1
+        date(2025,2,1), # elem_dt_2
+        "FUT_RSK_IN",   # scor_typ_cd -> matches
+        3.5,            # scor_val >= 3.0
+        "codeX", "2025-01-01", "2025-01-15", "ST1", "SEG1",
+        "2025-01-10", "2025-01-20", "RULE1", "1990-01-01",
+        "2025-02-01", "2025-03-01", "DX1", "SCN1", "2025-02-15",
+        123, "2025-01-01", "2025-05-01", "complaint", "supX",
+        "cont", "medcov", 1.1, 2.2
+    )
+]
 
-    <dependencies>
-        <!-- Drools Core -->
-        <dependency>
-            <groupId>org.drools</groupId>
-            <artifactId>drools-core</artifactId>
-            <version>${drools.version}</version>
-        </dependency>
+for row in rows:
+    gx.process(*row)
 
-        <!-- Drools Compiler -->
-        <dependency>
-            <groupId>org.drools</groupId>
-            <artifactId>drools-compiler</artifactId>
-            <version>${drools.version}</version>
-        </dependency>
-
-        <!-- KIE API -->
-        <dependency>
-            <groupId>org.kie</groupId>
-            <artifactId>kie-api</artifactId>
-            <version>${drools.version}</version>
-        </dependency>
-
-        <!-- KIE CI (for loading kmodule.xml, rules, etc.) -->
-        <dependency>
-            <groupId>org.kie</groupId>
-            <artifactId>kie-ci</artifactId>
-            <version>${drools.version}</version>
-        </dependency>
-
-        <!-- Logging (simple binding for SLF4J) -->
-        <dependency>
-            <groupId>org.slf4j</groupId>
-            <artifactId>slf4j-simple</artifactId>
-            <version>2.0.16</version>
-        </dependency>
-    </dependencies>
-
-    <build>
-        <plugins>
-            <!-- Shade plugin: create one fat JAR with all deps -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-shade-plugin</artifactId>
-                <version>3.4.1</version>
-                <executions>
-                    <execution>
-                        <phase>package</phase>
-                        <goals>
-                            <goal>shade</goal>
-                        </goals>
-                        <configuration>
-                            <createDependencyReducedPom>false</createDependencyReducedPom>
-                            <filters>
-                                <filter>
-                                    <artifact>*:*</artifact>
-                                    <includes>
-                                        <include>**/*.class</include>
-                                        <include>**/*.drl</include>
-                                        <include>META-INF/kmodule.xml</include>
-                                    </includes>
-                                </filter>
-                            </filters>
-                            <transformers>
-                                <!-- Service loader for Drools -->
-                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
-                                <!-- Keep manifest -->
-                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <mainClass>org.example.drools.Main</mainClass>
-                                </transformer>
-                            </transformers>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
-        </plugins>
-    </build>
-
-</project>
+results = gx.endPartition().toArray()
+for r in results:
+    print("STATUS =", r.getStatus())
