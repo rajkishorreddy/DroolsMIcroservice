@@ -1,48 +1,136 @@
+# pip install databricks-sdk
+# export DATABRICKS_HOST="https://<your-workspace>.azuredatabricks.net"
+# export DATABRICKS_TOKEN="<your-PAT>"
+
 from databricks.sdk import WorkspaceClient
 import time
 
-# Initialize client
+CLUSTER_ID = "<your-cluster-id>"
+JAR_PATH   = "dbfs:/FileStore/jars/CommonDataObject-1.0.jar"
+
 w = WorkspaceClient()
 
-CLUSTER_ID = "8903-210552-4xcvb13"
-JAR_PATH = "dbfs:/FileStore/jars/CommonDataObject-1.0.jar"
+# ---- helpers that work across sdk versions ----
 
-def uninstall_all_libs(cluster_id: str):
-    """Uninstall all libraries from the cluster"""
-    statuses = w.libraries.all_cluster_statuses(cluster_id)
-    for s in statuses.library_statuses or []:
-        print(f"Uninstalling {s.library} ...")
-        w.libraries.uninstall(cluster_id=cluster_id, library=s.library)
+def _get_statuses(cluster_id):
+    """
+    Returns a list of library status objects for the cluster, regardless of SDK version.
+    """
+    # new-ish SDK
+    try:
+        st = w.libraries.all_cluster_statuses(cluster_id)
+        return list(st.library_statuses or [])
+    except AttributeError:
+        pass
+    # older SDK
+    try:
+        st = w.libraries.cluster_status(cluster_id=cluster_id)
+        return list(st.library_statuses or [])
+    except Exception as e:
+        print("[libs] could not get statuses:", e)
+        return []
 
-    # Wait until all libs are detached
+def _uninstall(cluster_id, lib_obj):
+    """
+    Uninstalls one library, regardless of SDK version / signature.
+    """
+    # signature: uninstall(cluster_id=..., libraries=[Library])
+    try:
+        w.libraries.uninstall(cluster_id=cluster_id, libraries=[lib_obj])
+        return
+    except TypeError:
+        pass
+    # signature: uninstall(cluster_id=..., library=Library)
+    try:
+        w.libraries.uninstall(cluster_id=cluster_id, library=lib_obj)
+        return
+    except TypeError:
+        pass
+    raise RuntimeError("No matching uninstall() signature for this SDK version.")
+
+def _install_jar(cluster_id, jar_path):
+    """
+    Installs one JAR, regardless of SDK version / signature.
+    """
+    # signature: install(cluster_id=..., libraries=[{"jar": path}])
+    try:
+        w.libraries.install(cluster_id=cluster_id, libraries=[{"jar": jar_path}])
+        return
+    except TypeError:
+        pass
+    # signature: install(cluster_id=..., library={"jar": path})
+    try:
+        w.libraries.install(cluster_id=cluster_id, library={"jar": jar_path})
+        return
+    except TypeError:
+        pass
+    raise RuntimeError("No matching install() signature for this SDK version.")
+
+def _label(ls):
+    lib = ls.library
+    try:
+        return lib.jar or (lib.maven.coordinates if getattr(lib, "maven", None) else lib.whl or lib.egg or "unknown")
+    except Exception:
+        return str(lib)
+
+def _wait_until(cond, desc, timeout_sec=600, poll=5):
+    start = time.time()
     while True:
-        statuses = w.libraries.all_cluster_statuses(cluster_id)
-        if not statuses.library_statuses:
-            print("✅ All libraries uninstalled.")
-            break
-        print("Waiting for libraries to detach...")
-        time.sleep(10)
+        if cond():
+            return
+        if time.time() - start > timeout_sec:
+            raise TimeoutError(f"Timed out waiting for {desc}")
+        time.sleep(poll)
 
-def install_fat_jar(cluster_id: str, jar_path: str):
-    """Install single fat JAR"""
-    lib = {"jar": jar_path}
-    w.libraries.install(cluster_id=cluster_id, library=lib)
+# ---- actions ----
 
-    # Wait until it's active
-    while True:
-        statuses = w.libraries.all_cluster_statuses(cluster_id)
-        libs = statuses.library_statuses or []
-        if any(l.status == "INSTALLED" for l in libs):
-            print(f"✅ JAR {jar_path} installed successfully")
-            break
-        print("Waiting for JAR to be installed...")
-        time.sleep(10)
+def print_libs(cluster_id, header):
+    sts = _get_statuses(cluster_id)
+    print(f"\n[libs] {header}: {len(sts)} item(s)")
+    for ls in sts:
+        print(f"  - {_label(ls)} [{getattr(ls.status, 'value', getattr(ls, 'status', '?'))}]")
 
-# --- Run cleanup + install ---
-print("1) Removing old libraries...")
+def uninstall_all_libs(cluster_id):
+    sts = _get_statuses(cluster_id)
+    if not sts:
+        print("[libs] none to uninstall.")
+        return
+    for ls in sts:
+        print("Uninstalling:", _label(ls))
+        _uninstall(cluster_id, ls.library)
+
+    def _clean():
+        return len(_get_statuses(cluster_id)) == 0
+    _wait_until(_clean, "libraries to detach", poll=8)
+    print("✅ all libraries detached.")
+
+def install_fat_jar(cluster_id, jar_path):
+    print(f"Installing JAR: {jar_path}")
+    _install_jar(cluster_id, jar_path)
+
+    def _installed():
+        sts = _get_statuses(cluster_id)
+        if not sts: 
+            return False
+        # consider INSTALLED / RESOLVED as done across versions
+        for ls in sts:
+            st = getattr(ls.status, 'value', getattr(ls, 'status', ''))
+            if JAR_PATH in _label(ls) and st in ("INSTALLED", "RESOLVED"):
+                return True
+        return False
+
+    _wait_until(_installed, "jar to install", poll=8)
+    print("✅ jar installed.")
+
+# ---- run ----
+
+print_libs(CLUSTER_ID, "currently attached")
+print("\nStep 1: uninstalling everything…")
 uninstall_all_libs(CLUSTER_ID)
+print_libs(CLUSTER_ID, "after uninstall")
 
-print("2) Installing fat JAR...")
+print("\nStep 2: installing ONLY your fat jar…")
 install_fat_jar(CLUSTER_ID, JAR_PATH)
+print_libs(CLUSTER_ID, "final state")
 
-print("🎉 Done. Cluster now has only your fat JAR attached.")
+print("\n✅ done. cluster now has only your fat jar attached.")
