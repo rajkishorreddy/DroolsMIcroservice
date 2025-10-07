@@ -1,49 +1,78 @@
-<build>
-  <plugins>
-    <plugin>
-      <groupId>org.apache.maven.plugins</groupId>
-      <artifactId>maven-shade-plugin</artifactId>
-      <version>3.4.1</version>
-      <executions>
-        <execution>
-          <phase>package</phase>
-          <goals>
-            <goal>shade</goal>
-          </goals>
-          <configuration>
-            <createDependencyReducedPom>false</createDependencyReducedPom>
-            <transformers>
-              <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                <mainClass>your.main.Class</mainClass>
-              </transformer>
-            </transformers>
-          </configuration>
-        </execution>
-      </executions>
-    </plugin>
-  </plugins>
-</build>
+<project>
+  <!-- ... your existing coordinates, properties, dependencies ... -->
 
+  <build>
+    <plugins>
 
+      <!-- 1) Your generator: runs early so sources/resources exist before compile -->
+      <plugin>
+        <groupId>com.example.maven.plugin</groupId>
+        <artifactId>handler-generator-plugin</artifactId>
+        <version>1.0-SNAPSHOT</version>
+        <executions>
+          <execution>
+            <goals>
+              <goal>process-sources</goal>
+            </goals>
+            <!-- bind to generate-sources so Maven sees generated code before compile -->
+            <phase>generate-sources</phase>
+            <configuration>
+              <targetStage>RULES</targetStage>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
 
+      <!-- 2) Shade after everything is compiled -> produce ONE self-contained JAR -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <version>3.4.1</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals><goal>shade</goal></goals>
+            <configuration>
+              <!-- keep the POM simple -->
+              <createDependencyReducedPom>false</createDependencyReducedPom>
 
-<dependency>
-  <groupId>org.drools</groupId>
-  <artifactId>drools-core</artifactId>
-  <version>8.44.0.Final</version>
-</dependency>
-<dependency>
-  <groupId>org.drools</groupId>
-  <artifactId>drools-compiler</artifactId>
-  <version>8.44.0.Final</version>
-</dependency>
-<dependency>
-  <groupId>org.kie</groupId>
-  <artifactId>kie-api</artifactId>
-  <version>8.44.0.Final</version>
-</dependency>
-<dependency>
-  <groupId>org.mvel</groupId>
-  <artifactId>mvel2</artifactId>
-  <version>2.5.0.Final</version>
-</dependency>
+              <!-- include Drools + transitive deps + your classes/resources -->
+              <filters>
+                <filter>
+                  <artifact>*:*</artifact>
+                  <!-- include everything; rules/** is important -->
+                  <includes>
+                    <include>**/*.class</include>
+                    <include>rules/**</include>
+                    <include>META-INF/services/**</include>
+                  </includes>
+                </filter>
+              </filters>
+
+              <!-- KIE uses ServiceLoader; merge service descriptors -->
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                <!-- Optional: set a main class if you want a runnable jar -->
+                <!--
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <mainClass>com.example.Main</mainClass>
+                </transformer>
+                -->
+              </transformers>
+
+              <!-- Optional: relocate to avoid classpath clashes on DBR runtimes
+              <relocations>
+                <relocation>
+                  <pattern>org.mvel2</pattern>
+                  <shadedPattern>shade.org.mvel2</shadedPattern>
+                </relocation>
+              </relocations>
+              -->
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+    </plugins>
+  </build>
+</project>
