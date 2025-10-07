@@ -1,74 +1,24 @@
-# === set your vars ===
-NS=evisor-non-prod
-APP=canonical-json-transformation
-REGHOST=edginternal1uhg.optum.com
-SECRET=edge-node-jfrog   # try an existing docker secret name; change if needed
+// ---- visibility probe ----
+import java.sql.Date
+import scala.util.Try
 
+def canLoad(fqn: String) =
+  Try(Thread.currentThread.getContextClassLoader.loadClass(fqn)).toEither
 
-# image on the deployment
-kubectl -n $NS get deploy $APP -o jsonpath='{.spec.template.spec.containers[*].image}{"\n"}'
+val probes = Seq(
+  "CommonDataObject.CommonDataModel",
+  "CommonDataObject.CommonDataResultSet",
+  "MyDroolsConfig",                     // default package (your current case)
+  "CommonDataObject.MyDroolsConfig",    // if you later add a package
+  "org.kie.api.KieServices",            // Drools present?
+  "org.kie.api.runtime.KieContainer"
+)
 
-# does the deployment have imagePullSecrets?
-kubectl -n $NS get deploy $APP -o jsonpath='{.spec.template.spec.imagePullSecrets[*].name}{"\n"}'
-
-# service account used by the pod (often "default")
-kubectl -n $NS get deploy $APP -o jsonpath='{.spec.template.spec.serviceAccountName}{"\n"}'
-
-
-kubectl -n $NS get secret | grep -E 'docker|jfrog|cred|reg|dock' || true
-# list types so you can spot docker secrets
-kubectl -n $NS get secret -o jsonpath='{range .items[*]}{.metadata.name}{"  ->  "}{.type}{"\n"}{end}'
-
-
-kubectl -n $NS get secret $SECRET -o jsonpath='{.type}{"\n"}'
-
-# show the auth hosts inside the secret (macOS-friendly)
-kubectl -n $NS get secret $SECRET -o jsonpath='{.data.\.dockerconfigjson}' \
-| base64 -D | python3 - <<'PY'
-import sys, json
-j=json.load(sys.stdin)
-print("\n".join(j.get("auths",{}).keys()))
-PY
-
-
-kubectl -n $NS patch deploy $APP \
-  -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"'"$SECRET"'"}]}}}}'
-
-kubectl -n $NS rollout restart deploy/$APP
-kubectl -n $NS rollout status deploy/$APP
-
-
-POD=$(kubectl -n $NS get pod -l app=canonical-app -o jsonpath='{.items[0].metadata.name}')
-echo $POD
-kubectl -n $NS get pod $POD -o jsonpath='{.spec.imagePullSecrets[*].name}{"\n"}'
-kubectl -n $NS describe pod $POD | sed -n '/Events:/,$p'
-
-kubectl -n $NS create secret docker-registry regcred-nonprod \
-  --docker-server=$REGHOST \
-  --docker-username='<YOUR_USER>' \
-  --docker-password='<YOUR_TOKEN_OR_PASSWORD>' \
-  --docker-email='<YOUR_EMAIL>'
-
-kubectl -n $NS patch deploy $APP \
-  -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"regcred-nonprod"}]}}}}'
-
-kubectl -n $NS rollout restart deploy/$APP
-kubectl -n $NS rollout status deploy/$APP
-
-
-# deployment now shows the pull secret?
-kubectl -n $NS get deploy $APP -o jsonpath='{.spec.template.spec.imagePullSecrets[*].name}{"\n"}'
-
-# still failing? grab last events quickly
-NEWPOD=$(kubectl -n $NS get pod -l app=canonical-app -o jsonpath='{.items[-1:].metadata.name}')
-kubectl -n $NS describe pod $NEWPOD | sed -n '/Events:/,$p'
+probes.foreach { fqn =>
+  println(f"$fqn%-40s -> ${canLoad(fqn).fold(e => s"NO (${e.getClass.getSimpleName})", _ => "OK")}")
+}
 
 
 
 
 
-kubectl -n evisor-non-prod get secret <secret-name> -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d
-
-
-
-kubectl -n evisor-non-prod get pod <pod-name> -o jsonpath='{.spec.imagePullSecrets[*].name}{"\n"}'
