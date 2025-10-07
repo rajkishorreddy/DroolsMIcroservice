@@ -1,147 +1,94 @@
-# --- Build rows that match your rule + a negative control ---
-from datetime import date, timedelta
-today = date.today()
-inside_90d = today - timedelta(days=60)
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
 
-rows = [
-    # INDV 1 — SCORE fact (matches first half)
-    (1,  None, 1.0, 45, "INDV_SCOR_FACT",
-     None, None,
-     "FUT_RSK_IN", 3.5,
-     123, None, None, "TX", "SEGI",
-     None, None, "RULECD",
-     None, None, None,
-     None, "SCN",
-     None, 0,
-     None, None, None,
-     None, None, None, 0.0, 0.0),
+    <groupId>org.example</groupId>
+    <artifactId>drools-databricks</artifactId>
+    <version>1.0.0</version>
 
-    # INDV 1 — LAB fact (elem 478 within 90d; satisfies exists(...))
-    (1,  478, 1.0, 45, "INDV_ELEMENTS_LAB",
-     inside_90d, None,
-     None, None,
-     123, None, None, "TX", "SEGI",
-     None, None, "RULECD",
-     None, None, None,
-     None, "SCN",
-     None, 0,
-     None, None, None,
-     None, None, None, 0.0, 0.0),
+    <properties>
+        <maven.compiler.source>1.8</maven.compiler.source>
+        <maven.compiler.target>1.8</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <drools.version>7.59.0.Final</drools.version>
+    </properties>
 
-    # INDV 2 — non-match (low score, no lab)
-    (2,  None, 1.0, 38, "INDV_SCOR_FACT",
-     None, None,
-     "FUT_RSK_IN", 2.0,
-     456, None, None, "CA", "SEG2",
-     None, None, "RULEXY",
-     None, None, None,
-     None, "SCN",
-     None, 0,
-     None, None, None,
-     None, None, None, 0.0, 0.0),
-]
+    <dependencies>
+        <!-- Drools Core -->
+        <dependency>
+            <groupId>org.drools</groupId>
+            <artifactId>drools-core</artifactId>
+            <version>${drools.version}</version>
+        </dependency>
 
+        <!-- Drools Compiler -->
+        <dependency>
+            <groupId>org.drools</groupId>
+            <artifactId>drools-compiler</artifactId>
+            <version>${drools.version}</version>
+        </dependency>
 
-jvm = spark._jvm
-CDM = jvm.org.example.drools.CommonDataModel
+        <!-- KIE API -->
+        <dependency>
+            <groupId>org.kie</groupId>
+            <artifactId>kie-api</artifactId>
+            <version>${drools.version}</version>
+        </dependency>
 
-# Boxed types
-JInt    = jvm.java.lang.Integer
-JDouble = jvm.java.lang.Double
-JString = jvm.java.lang.String  # not strictly needed; Python str -> java.lang.String
-JDate   = jvm.java.sql.Date
+        <!-- KIE CI (for loading kmodule.xml, rules, etc.) -->
+        <dependency>
+            <groupId>org.kie</groupId>
+            <artifactId>kie-ci</artifactId>
+            <version>${drools.version}</version>
+        </dependency>
 
-def to_jdate(py):
-    return None if py is None else JDate.valueOf(py.isoformat())
+        <!-- Logging (simple binding for SLF4J) -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>2.0.16</version>
+        </dependency>
+    </dependencies>
 
-def mk_cdm(t):
-    (indv_id, elem_nbr, elem_qty, age, mem_name,
-     elem_dt_1, elem_dt_2,
-     scor_typ_cd, scor_val,
-     prg_srvc_id, trn_dt, eff_dt, st_abbr_cd, optum_seg_id,
-     id_run_dt, outbound_file_id, scen_rule_cd,
-     dob, effective_date, end_date,
-     med_dx_of_interest, scenario_cd,
-     next_effective_date, grace_period,
-     min_eff_date, max_end_date, final_end_date,
-     adt_chief_complaint, elem_sup, continuity, med_cov, rel_iprnt_risk_12_mo_nbr) = t
+    <build>
+        <plugins>
+            <!-- Shade plugin: create one fat JAR with all deps -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.4.1</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <includes>
+                                        <include>**/*.class</include>
+                                        <include>**/*.drl</include>
+                                        <include>META-INF/kmodule.xml</include>
+                                    </includes>
+                                </filter>
+                            </filters>
+                            <transformers>
+                                <!-- Service loader for Drools -->
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                                <!-- Keep manifest -->
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>org.example.drools.Main</mainClass>
+                                </transformer>
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 
-    return CDM(
-        JInt(indv_id) if indv_id is not None else None,
-        JInt(elem_nbr) if elem_nbr is not None else None,
-        JDouble(elem_qty) if elem_qty is not None else None,
-        JInt(age) if age is not None else None,
-        mem_name,
-        to_jdate(elem_dt_1),
-        to_jdate(elem_dt_2),
-        scor_typ_cd,
-        JDouble(scor_val) if scor_val is not None else None,
-        JInt(prg_srvc_id) if prg_srvc_id is not None else None,
-        to_jdate(trn_dt),
-        to_jdate(eff_dt),
-        st_abbr_cd,
-        optum_seg_id,
-        to_jdate(id_run_dt),
-        JInt(outbound_file_id) if outbound_file_id is not None else None,
-        scen_rule_cd,
-        to_jdate(dob),
-        to_jdate(effective_date),
-        to_jdate(end_date),
-        med_dx_of_interest,
-        scenario_cd,
-        to_jdate(next_effective_date),
-        JInt(grace_period) if grace_period is not None else None,
-        to_jdate(min_eff_date),
-        to_jdate(max_end_date),
-        to_jdate(final_end_date),
-        adt_chief_complaint,
-        elem_sup,
-        continuity,
-        JDouble(med_cov) if med_cov is not None else None,
-        JDouble(rel_iprnt_risk_12_mo_nbr) if rel_iprnt_risk_12_mo_nbr is not None else None
-    )
-
-
-
-gx = spark._jvm.org.example.drools.GenericExecutor()
-
-for row in rows:   # rows = our 3 test tuples with 32 fields
-    gx.process(
-        spark._jvm.java.lang.Integer(row[0]) if row[0] is not None else None,
-        spark._jvm.java.lang.Integer(row[1]) if row[1] is not None else None,
-        spark._jvm.java.lang.Double(row[2]) if row[2] is not None else None,
-        spark._jvm.java.lang.Integer(row[3]) if row[3] is not None else None,
-        row[4],  # mem_name (string)
-        to_jdate(row[5]),  # elem_dt_1
-        to_jdate(row[6]),  # elem_dt_2
-        row[7],            # scor_typ_cd
-        spark._jvm.java.lang.Double(row[8]) if row[8] is not None else None,
-        spark._jvm.java.lang.Integer(row[9]) if row[9] is not None else None,
-        to_jdate(row[10]), # trn_dt
-        to_jdate(row[11]), # eff_dt
-        row[12],           # st_abbr_cd
-        row[13],           # optum_seg_id
-        to_jdate(row[14]), # id_run_dt
-        spark._jvm.java.lang.Integer(row[15]) if row[15] is not None else None,
-        row[16],           # scen_rule_cd
-        to_jdate(row[17]), # dob
-        to_jdate(row[18]), # effective_date
-        to_jdate(row[19]), # end_date
-        row[20],           # med_dx_of_interest
-        row[21],           # scenario_cd
-        to_jdate(row[22]), # next_effective_date
-        spark._jvm.java.lang.Integer(row[23]) if row[23] is not None else None,
-        to_jdate(row[24]), # min_eff_date
-        to_jdate(row[25]), # max_end_date
-        to_jdate(row[26]), # final_end_date
-        row[27],           # adt_chief_complaint
-        row[28],           # elem_sup
-        row[29],           # continuity
-        spark._jvm.java.lang.Double(row[30]) if row[30] is not None else None,
-        spark._jvm.java.lang.Double(row[31]) if row[31] is not None else None
-    )
-
-results = gx.endPartition().toArray()
-print("=== RULE RESULTS ===")
-for r in results:
-    print("STATUS =", r.getStatus())
+</project>
