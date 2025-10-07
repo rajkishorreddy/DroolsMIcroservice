@@ -19,3 +19,12 @@ jar = "/dbfs/FileStore/jars/CommonDataObject-1.0.jar"
 with zipfile.ZipFile(jar, "r") as z:
     entries = [n for n in z.namelist() if "MyDroolsConfig" in n or "CommonDataObject" in n or "kie" in n]
     print(entries[:50])
+
+
+// Try to load your custom classes directly
+println(Class.forName("CommonDataObject.MyDroolsConfig"))
+println(Class.forName("CommonDataObject.CommonDataModel"))
+
+// Check Drools API
+println(Class.forName("org.kie.api.runtime.KieContainer"))
+
