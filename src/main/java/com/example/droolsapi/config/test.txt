@@ -103,33 +103,45 @@ def mk_cdm(t):
 
 
 
-# JVM references
 gx = spark._jvm.org.example.drools.GenericExecutor()
-CDM = spark._jvm.org.example.drools.CommonDataModel
-RS  = spark._jvm.org.example.drools.CommonDataResultSet
 
-# Build test rows (we already did mk_cdm earlier)
-test_objs = [mk_cdm(r) for r in rows]
-
-# Feed each object into GenericExecutor.process()
-for obj in test_objs:
+for row in rows:   # rows = our 3 test tuples with 32 fields
     gx.process(
-        obj.getIndv_id(),
-        obj.getElem_nbr(),
-        obj.getElem_qty(),
-        obj.getAge(),
-        obj.getMem_name(),
-        obj.getElem_dt_1(),
-        obj.getElem_dt_2(),
-        obj.getScor_typ_cd(),
-        obj.getScor_val()
+        spark._jvm.java.lang.Integer(row[0]) if row[0] is not None else None,
+        spark._jvm.java.lang.Integer(row[1]) if row[1] is not None else None,
+        spark._jvm.java.lang.Double(row[2]) if row[2] is not None else None,
+        spark._jvm.java.lang.Integer(row[3]) if row[3] is not None else None,
+        row[4],  # mem_name (string)
+        to_jdate(row[5]),  # elem_dt_1
+        to_jdate(row[6]),  # elem_dt_2
+        row[7],            # scor_typ_cd
+        spark._jvm.java.lang.Double(row[8]) if row[8] is not None else None,
+        spark._jvm.java.lang.Integer(row[9]) if row[9] is not None else None,
+        to_jdate(row[10]), # trn_dt
+        to_jdate(row[11]), # eff_dt
+        row[12],           # st_abbr_cd
+        row[13],           # optum_seg_id
+        to_jdate(row[14]), # id_run_dt
+        spark._jvm.java.lang.Integer(row[15]) if row[15] is not None else None,
+        row[16],           # scen_rule_cd
+        to_jdate(row[17]), # dob
+        to_jdate(row[18]), # effective_date
+        to_jdate(row[19]), # end_date
+        row[20],           # med_dx_of_interest
+        row[21],           # scenario_cd
+        to_jdate(row[22]), # next_effective_date
+        spark._jvm.java.lang.Integer(row[23]) if row[23] is not None else None,
+        to_jdate(row[24]), # min_eff_date
+        to_jdate(row[25]), # max_end_date
+        to_jdate(row[26]), # final_end_date
+        row[27],           # adt_chief_complaint
+        row[28],           # elem_sup
+        row[29],           # continuity
+        spark._jvm.java.lang.Double(row[30]) if row[30] is not None else None,
+        spark._jvm.java.lang.Double(row[31]) if row[31] is not None else None
     )
 
-# Fire rules once for this partition
 results = gx.endPartition().toArray()
-
 print("=== RULE RESULTS ===")
 for r in results:
     print("STATUS =", r.getStatus())
-
-
