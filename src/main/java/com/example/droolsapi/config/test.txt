@@ -1,55 +1,82 @@
-package com.example;
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
 
-import com.example.CommonDataObject.CommonDataModel;
-import com.example.CommonDataObject.CommonDataResultSet;
-import org.kie.api.runtime.KieContainer;
-import org.kie.api.runtime.KieServices;
-import org.kie.api.runtime.KieSession;
+  <groupId>org.example</groupId>
+  <artifactId>drools-databricks</artifactId>
+  <version>1.0.0</version>
 
-import java.sql.Date;
-import java.util.Collection;
-import java.util.stream.Stream;
+  <properties>
+    <maven.compiler.source>1.8</maven.compiler.source>
+    <maven.compiler.target>1.8</maven.compiler.target>
+    <drools.version>7.74.0.Final</drools.version>
+  </properties>
 
-public class GenericExecutor_CommonDataModel {
+  <dependencies>
+    <dependency>
+      <groupId>org.drools</groupId>
+      <artifactId>drools-core</artifactId>
+      <version>${drools.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.drools</groupId>
+      <artifactId>drools-compiler</artifactId>
+      <version>${drools.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.kie</groupId>
+      <artifactId>kie-api</artifactId>
+      <version>${drools.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.kie</groupId>
+      <artifactId>kie-ci</artifactId>
+      <version>${drools.version}</version>
+    </dependency>
+  </dependencies>
 
-    private boolean first = true;
-    private KieSession kieSession = null;
-
-    public Stream<CommonDataResultSet> process(Integer indv_id, Integer elem_nbr,
-                                               Double elem_qty, Integer age,
-                                               String mem_name, Date elem_dt_1,
-                                               Date elem_dt_2, String scor_typ_cd,
-                                               Double scor_val) {
-        if (first) {
-            kieSession = getContainerInstance().newKieSession("rulesKSession");
-            first = false;
-        }
-
-        CommonDataModel obj = new CommonDataModel(indv_id, elem_nbr, elem_qty,
-                                                  age, mem_name, elem_dt_1,
-                                                  elem_dt_2, scor_typ_cd, scor_val);
-        kieSession.insert(obj);
-        return Stream.empty(); // buffer until endPartition
-    }
-
-    public Stream<CommonDataResultSet> endPartition() {
-        kieSession.fireAllRules(); // fire once per partition
-        Collection<?> facts = kieSession.getObjects(o -> o instanceof CommonDataResultSet);
-        kieSession.dispose();
-        return facts.stream().map(f -> (CommonDataResultSet) f);
-    }
-
-    private KieContainer getContainerInstance() {
-        KieServices ks = KieServices.Factory.get();
-        return ks.getKieClasspathContainer();
-    }
-}
+  <build>
+    <plugins>
+      <!-- one self-contained jar with service descriptors merged -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <version>3.4.1</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals><goal>shade</goal></goals>
+            <configuration>
+              <createDependencyReducedPom>false</createDependencyReducedPom>
+              <filters>
+                <filter>
+                  <artifact>*:*</artifact>
+                  <!-- keep class files + rules + META-INF/services -->
+                  <includes>
+                    <include>**/*.class</include>
+                    <include>rules/**</include>
+                    <include>META-INF/services/**</include>
+                  </includes>
+                </filter>
+              </filters>
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+              </transformers>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
 
 
 
 
 <?xml version="1.0" encoding="UTF-8"?>
 <kmodule xmlns="http://www.drools.org/xsd/kmodule">
+  <!-- loads all .drl files under resources/rules -->
   <kbase name="rulesKBase" packages="rules">
     <ksession name="rulesKSession"/>
   </kbase>
@@ -59,73 +86,57 @@ public class GenericExecutor_CommonDataModel {
 
 
 
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
-    <modelVersion>4.0.0</modelVersion>
+package org.example.drools;
 
-    <groupId>com.example</groupId>
-    <artifactId>drools-databricks</artifactId>
-    <version>1.0-SNAPSHOT</version>
+import org.kie.api.runtime.KieContainer;
+import org.kie.api.runtime.KieServices;
+import org.kie.api.runtime.KieSession;
 
-    <properties>
-        <maven.compiler.source>1.8</maven.compiler.source>
-        <maven.compiler.target>1.8</maven.compiler.target>
-        <drools.version>7.74.0.Final</drools.version>
-    </properties>
+import java.sql.Date;
+import java.util.Collection;
+import java.util.stream.Stream;
 
-    <dependencies>
-        <!-- Drools Core -->
-        <dependency>
-            <groupId>org.drools</groupId>
-            <artifactId>drools-core</artifactId>
-            <version>${drools.version}</version>
-        </dependency>
+public class GenericExecutor {
 
-        <!-- Drools Compiler -->
-        <dependency>
-            <groupId>org.drools</groupId>
-            <artifactId>drools-compiler</artifactId>
-            <version>${drools.version}</version>
-        </dependency>
+    private boolean first = true;
+    private KieSession kieSession = null;
 
-        <!-- KIE API -->
-        <dependency>
-            <groupId>org.kie</groupId>
-            <artifactId>kie-api</artifactId>
-            <version>${drools.version}</version>
-        </dependency>
+    /** call once per row inside a Spark partition */
+    public Stream<CommonDataResultSet> process(Integer indv_id, Integer elem_nbr,
+                                               Double elem_qty, Integer age,
+                                               String mem_name, Date elem_dt_1,
+                                               Date elem_dt_2, String scor_typ_cd,
+                                               Double scor_val) {
+        if (first) {
+            // session name from kmodule.xml
+            kieSession = getContainer().newKieSession("rulesKSession");
+            first = false;
+        }
+        CommonDataModel fact = new CommonDataModel(indv_id, elem_nbr, elem_qty, age,
+                                                   mem_name, elem_dt_1, elem_dt_2,
+                                                   scor_typ_cd, scor_val);
+        kieSession.insert(fact);
+        return Stream.empty(); // buffer until endPartition()
+    }
 
-        <!-- KIE CI -->
-        <dependency>
-            <groupId>org.kie</groupId>
-            <artifactId>kie-ci</artifactId>
-            <version>${drools.version}</version>
-        </dependency>
-    </dependencies>
+    /** call once at the end of the Spark partition */
+    public Stream<CommonDataResultSet> endPartition() {
+        if (kieSession == null) return Stream.empty();
+        kieSession.fireAllRules();
+        Collection<?> results = kieSession.getObjects(o -> o instanceof CommonDataResultSet);
+        kieSession.dispose();
+        return results.stream().map(o -> (CommonDataResultSet) o);
+    }
 
-    <build>
-        <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-shade-plugin</artifactId>
-                <version>3.4.1</version>
-                <executions>
-                    <execution>
-                        <phase>package</phase>
-                        <goals><goal>shade</goal></goals>
-                        <configuration>
-                            <createDependencyReducedPom>false</createDependencyReducedPom>
-                            <transformers>
-                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
-                            </transformers>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
-        </plugins>
-    </build>
-</project>
+    private static KieContainer getContainer() {
+        KieServices ks = KieServices.Factory.get();
+        return ks.getKieClasspathContainer();
+    }
+}
+
+
+
+
 
 
 
