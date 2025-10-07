@@ -1,136 +1,134 @@
-# pip install databricks-sdk
-# export DATABRICKS_HOST="https://<your-workspace>.azuredatabricks.net"
-# export DATABRICKS_TOKEN="<your-PAT>"
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
 
-from databricks.sdk import WorkspaceClient
-import time
+  <groupId>com.example</groupId>
+  <artifactId>CommonDataObject</artifactId>
+  <version>1.0</version>
 
-CLUSTER_ID = "<your-cluster-id>"
-JAR_PATH   = "dbfs:/FileStore/jars/CommonDataObject-1.0.jar"
+  <properties>
+    <!-- Java 8 bytecode -->
+    <maven.compiler.source>1.8</maven.compiler.source>
+    <maven.compiler.target>1.8</maven.compiler.target>
+    <maven.compiler.release>8</maven.compiler.release>
+    <!-- Java-8-compatible Drools/KIE line -->
+    <kie.version>7.59.0.Final</kie.version>
+  </properties>
 
-w = WorkspaceClient()
+  <!-- Pin all KIE/Drools artifacts to the same Java-8-compatible version -->
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.kie</groupId>
+        <artifactId>kie-platform-bom</artifactId>
+        <version>${kie.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <!-- (any other BOMs you need go here) -->
+    </dependencies>
+  </dependencyManagement>
 
-# ---- helpers that work across sdk versions ----
+  <dependencies>
+    <!-- Drools / KIE (versions come from the BOM; do NOT specify 8.x anywhere) -->
+    <dependency>
+      <groupId>org.drools</groupId>
+      <artifactId>drools-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.drools</groupId>
+      <artifactId>drools-compiler</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.kie</groupId>
+      <artifactId>kie-api</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.kie</groupId>
+      <artifactId>kie-internal</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.drools</groupId>
+      <artifactId>drools-mvel</artifactId>
+    </dependency>
 
-def _get_statuses(cluster_id):
-    """
-    Returns a list of library status objects for the cluster, regardless of SDK version.
-    """
-    # new-ish SDK
-    try:
-        st = w.libraries.all_cluster_statuses(cluster_id)
-        return list(st.library_statuses or [])
-    except AttributeError:
-        pass
-    # older SDK
-    try:
-        st = w.libraries.cluster_status(cluster_id=cluster_id)
-        return list(st.library_statuses or [])
-    except Exception as e:
-        print("[libs] could not get statuses:", e)
-        return []
+    <!-- your logging/json etc -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>2.0.16</version>
+    </dependency>
+    <dependency>
+      <groupId>ch.qos.logback</groupId>
+      <artifactId>logback-classic</artifactId>
+      <version>1.5.16</version>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>2.18.2</version>
+    </dependency>
+  </dependencies>
 
-def _uninstall(cluster_id, lib_obj):
-    """
-    Uninstalls one library, regardless of SDK version / signature.
-    """
-    # signature: uninstall(cluster_id=..., libraries=[Library])
-    try:
-        w.libraries.uninstall(cluster_id=cluster_id, libraries=[lib_obj])
-        return
-    except TypeError:
-        pass
-    # signature: uninstall(cluster_id=..., library=Library)
-    try:
-        w.libraries.uninstall(cluster_id=cluster_id, library=lib_obj)
-        return
-    except TypeError:
-        pass
-    raise RuntimeError("No matching uninstall() signature for this SDK version.")
+  <build>
+    <plugins>
+      <!-- ensure we really emit 52.0 bytecode -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.11.0</version>
+        <configuration>
+          <source>${maven.compiler.source}</source>
+          <target>${maven.compiler.target}</target>
+          <release>${maven.compiler.release}</release>
+        </configuration>
+      </plugin>
 
-def _install_jar(cluster_id, jar_path):
-    """
-    Installs one JAR, regardless of SDK version / signature.
-    """
-    # signature: install(cluster_id=..., libraries=[{"jar": path}])
-    try:
-        w.libraries.install(cluster_id=cluster_id, libraries=[{"jar": jar_path}])
-        return
-    except TypeError:
-        pass
-    # signature: install(cluster_id=..., library={"jar": path})
-    try:
-        w.libraries.install(cluster_id=cluster_id, library={"jar": jar_path})
-        return
-    except TypeError:
-        pass
-    raise RuntimeError("No matching install() signature for this SDK version.")
+      <!-- your generator (as you had it) -->
+      <plugin>
+        <groupId>com.example.maven.plugin</groupId>
+        <artifactId>handler-generator-plugin</artifactId>
+        <version>1.0-SNAPSHOT</version>
+        <executions>
+          <execution>
+            <goals><goal>process-sources</goal></goals>
+          </execution>
+        </executions>
+        <configuration>
+          <targetStage>RULES</targetStage>
+        </configuration>
+      </plugin>
 
-def _label(ls):
-    lib = ls.library
-    try:
-        return lib.jar or (lib.maven.coordinates if getattr(lib, "maven", None) else lib.whl or lib.egg or "unknown")
-    except Exception:
-        return str(lib)
-
-def _wait_until(cond, desc, timeout_sec=600, poll=5):
-    start = time.time()
-    while True:
-        if cond():
-            return
-        if time.time() - start > timeout_sec:
-            raise TimeoutError(f"Timed out waiting for {desc}")
-        time.sleep(poll)
-
-# ---- actions ----
-
-def print_libs(cluster_id, header):
-    sts = _get_statuses(cluster_id)
-    print(f"\n[libs] {header}: {len(sts)} item(s)")
-    for ls in sts:
-        print(f"  - {_label(ls)} [{getattr(ls.status, 'value', getattr(ls, 'status', '?'))}]")
-
-def uninstall_all_libs(cluster_id):
-    sts = _get_statuses(cluster_id)
-    if not sts:
-        print("[libs] none to uninstall.")
-        return
-    for ls in sts:
-        print("Uninstalling:", _label(ls))
-        _uninstall(cluster_id, ls.library)
-
-    def _clean():
-        return len(_get_statuses(cluster_id)) == 0
-    _wait_until(_clean, "libraries to detach", poll=8)
-    print("✅ all libraries detached.")
-
-def install_fat_jar(cluster_id, jar_path):
-    print(f"Installing JAR: {jar_path}")
-    _install_jar(cluster_id, jar_path)
-
-    def _installed():
-        sts = _get_statuses(cluster_id)
-        if not sts: 
-            return False
-        # consider INSTALLED / RESOLVED as done across versions
-        for ls in sts:
-            st = getattr(ls.status, 'value', getattr(ls, 'status', ''))
-            if JAR_PATH in _label(ls) and st in ("INSTALLED", "RESOLVED"):
-                return True
-        return False
-
-    _wait_until(_installed, "jar to install", poll=8)
-    print("✅ jar installed.")
-
-# ---- run ----
-
-print_libs(CLUSTER_ID, "currently attached")
-print("\nStep 1: uninstalling everything…")
-uninstall_all_libs(CLUSTER_ID)
-print_libs(CLUSTER_ID, "after uninstall")
-
-print("\nStep 2: installing ONLY your fat jar…")
-install_fat_jar(CLUSTER_ID, JAR_PATH)
-print_libs(CLUSTER_ID, "final state")
-
-print("\n✅ done. cluster now has only your fat jar attached.")
+      <!-- Shade into one fat jar; include META-INF/services so KIE’s ServiceLoader works -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <version>3.5.0</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals><goal>shade</goal></goals>
+            <configuration>
+              <createDependencyReducedPom>false</createDependencyReducedPom>
+              <filters>
+                <filter>
+                  <artifact>*:*</artifact>
+                  <includes>
+                    <include>**/*.class</include>
+                    <include>rules/**</include>
+                    <include>META-INF/services/**</include>
+                  </includes>
+                </filter>
+              </filters>
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                <!-- if you have a main class, you can also add ManifestResourceTransformer -->
+              </transformers>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
