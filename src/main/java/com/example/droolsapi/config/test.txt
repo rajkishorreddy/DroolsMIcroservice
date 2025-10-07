@@ -1,3 +1,35 @@
+from databricks.sdk import WorkspaceClient
+import base64
+import os
+
+w = WorkspaceClient()
+
+def dbfs_upload_large(local_path: str, dbfs_path: str, overwrite: bool = True, chunk_bytes: int = 8*1024*1024):
+    size = os.path.getsize(local_path)
+    print(f"Uploading {local_path} ({size/1024/1024:.2f} MB) → {dbfs_path}")
+
+    # create handle
+    handle = w.dbfs.create(dbfs_path, overwrite=overwrite).handle
+
+    # stream in chunks
+    with open(local_path, "rb") as f:
+        while True:
+            chunk = f.read(chunk_bytes)
+            if not chunk:
+                break
+            w.dbfs.add_block(handle=handle, data=base64.b64encode(chunk).decode("utf-8"))
+
+    # finalize
+    w.dbfs.close(handle)
+    print("Upload complete.")
+
+# usage
+local = "/path/to/target/CommonDataObject-1.0.jar"           # your fat jar
+dbfs  = "dbfs:/FileStore/jars/CommonDataObject-1.0.jar"
+dbfs_upload_large(local, dbfs, overwrite=True)
+
+
+
 import zipfile
 
 jar = "/dbfs/FileStore/jars/CommonDataObject-1.0.jar"
