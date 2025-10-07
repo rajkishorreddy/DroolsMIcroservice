@@ -1,30 +1,69 @@
-// visibility probe
-import scala.util.Try
-def canLoad(fqn: String) = Try(Class.forName(fqn)).isSuccess
-val checks = Seq(
-  "org.kie.api.KieServices",                 // Drools core
-  "org.kie.api.runtime.KieContainer",
-  "CommonDataObject.CommonDataModel",        // your model
-  "CommonDataObject.CommonDataResultSet",
-  "CommonDataObject.MyDroolsConfig",         // if you moved it into a package
-  "MyDroolsConfig"                           // fallback if still in default package
+import time
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.compute import Library
+
+w = WorkspaceClient(host=WORKSPACE_HOST)  # if you already set DATABRICKS_HOST/TOKEN, you can just do WorkspaceClient()
+
+def wait_for_cluster_state(cluster_id: str, expect: str):
+    while True:
+        st = w.clusters.get(cluster_id).state.value
+        print("Cluster state:", st)
+        if st == expect:
+            return
+        time.sleep(10)
+
+def wait_for_libs_resolved(cluster_id: str):
+    # poll the per-library status until all are RESOLVED
+    while True:
+        statuses = w.libraries.cluster_statuses().library_statuses or []
+        for s in statuses:
+            if s.cluster_id == cluster_id:
+                lib_states = [(ls.library, ls.status.value, (ls.messages or [])) for ls in (s.library_statuses or [])]
+                print("Library statuses:", [(l.jar or l.maven, st) for (l, st, _) in lib_states])
+                if all(st in ("INSTALLED", "RESOLVED") for (_, st, _) in lib_states):
+                    return
+        time.sleep(5)
+
+def uninstall_all_libs(cluster_id: str):
+    statuses = w.libraries.cluster_statuses().library_statuses or []
+    target = next((s for s in statuses if s.cluster_id == cluster_id), None)
+    if not target or not target.library_statuses:
+        print("No libraries attached.")
+        return
+    # uninstall each lib we see
+    for ls in target.library_statuses:
+        lib = ls.library
+        print("Uninstalling:", lib.jar or (lib.maven.coordinates if lib.maven else lib.egg or lib.whl))
+        w.libraries.uninstall(cluster_id=cluster_id, libraries=[lib])
+
+    # wait until cluster reports no libs
+    while True:
+        statuses = w.libraries.cluster_statuses().library_statuses or []
+        target = next((s for s in statuses if s.cluster_id == cluster_id), None)
+        if not target or not target.library_statuses:
+            print("All libraries uninstalled.")
+            return
+        time.sleep(5)
+
+# --- run the reset sequence ---
+print("Stopping notebooks using the cluster (if any) is recommended.")
+
+print("\n1) Uninstall existing libraries …")
+uninstall_all_libs(CLUSTER_ID)
+
+print("\n2) Restart cluster to clear classpath …")
+w.clusters.restart(CLUSTER_ID)
+wait_for_cluster_state(CLUSTER_ID, "RUNNING")
+
+print("\n3) Install ONLY the fat jar …")
+w.libraries.install(
+    cluster_id=CLUSTER_ID,
+    libraries=[Library(jar=FAT_JAR_DBFS)]
 )
-checks.foreach(f => println(f.padTo(45,' ') + " -> " + canLoad(f)))
+wait_for_libs_resolved(CLUSTER_ID)
 
+print("\n4) Final cluster restart (ensures the driver picks up new classpath) …")
+w.clusters.restart(CLUSTER_ID)
+wait_for_cluster_state(CLUSTER_ID, "RUNNING")
 
-
-import zipfile
-
-jar = "/dbfs/FileStore/jars/CommonDataObject-1.0.jar"
-with zipfile.ZipFile(jar, "r") as z:
-    entries = [n for n in z.namelist() if "MyDroolsConfig" in n or "CommonDataObject" in n or "kie" in n]
-    print(entries[:50])
-
-
-// Try to load your custom classes directly
-println(Class.forName("CommonDataObject.MyDroolsConfig"))
-println(Class.forName("CommonDataObject.CommonDataModel"))
-
-// Check Drools API
-println(Class.forName("org.kie.api.runtime.KieContainer"))
-
+print("\n✅ Clean attach done. Test in a Scala cell now.")
