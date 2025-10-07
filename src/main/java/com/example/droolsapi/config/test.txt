@@ -102,3 +102,34 @@ def mk_cdm(t):
     )
 
 
+
+# JVM references
+gx = spark._jvm.org.example.drools.GenericExecutor()
+CDM = spark._jvm.org.example.drools.CommonDataModel
+RS  = spark._jvm.org.example.drools.CommonDataResultSet
+
+# Build test rows (we already did mk_cdm earlier)
+test_objs = [mk_cdm(r) for r in rows]
+
+# Feed each object into GenericExecutor.process()
+for obj in test_objs:
+    gx.process(
+        obj.getIndv_id(),
+        obj.getElem_nbr(),
+        obj.getElem_qty(),
+        obj.getAge(),
+        obj.getMem_name(),
+        obj.getElem_dt_1(),
+        obj.getElem_dt_2(),
+        obj.getScor_typ_cd(),
+        obj.getScor_val()
+    )
+
+# Fire rules once for this partition
+results = gx.endPartition().toArray()
+
+print("=== RULE RESULTS ===")
+for r in results:
+    print("STATUS =", r.getStatus())
+
+
