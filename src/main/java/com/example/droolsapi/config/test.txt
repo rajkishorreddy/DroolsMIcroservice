@@ -1,72 +1,131 @@
+package com.example;
+
+import com.example.CommonDataObject.CommonDataModel;
+import com.example.CommonDataObject.CommonDataResultSet;
+import org.kie.api.runtime.KieContainer;
+import org.kie.api.runtime.KieServices;
+import org.kie.api.runtime.KieSession;
+
+import java.sql.Date;
+import java.util.Collection;
+import java.util.stream.Stream;
+
+public class GenericExecutor_CommonDataModel {
+
+    private boolean first = true;
+    private KieSession kieSession = null;
+
+    public Stream<CommonDataResultSet> process(Integer indv_id, Integer elem_nbr,
+                                               Double elem_qty, Integer age,
+                                               String mem_name, Date elem_dt_1,
+                                               Date elem_dt_2, String scor_typ_cd,
+                                               Double scor_val) {
+        if (first) {
+            kieSession = getContainerInstance().newKieSession("rulesKSession");
+            first = false;
+        }
+
+        CommonDataModel obj = new CommonDataModel(indv_id, elem_nbr, elem_qty,
+                                                  age, mem_name, elem_dt_1,
+                                                  elem_dt_2, scor_typ_cd, scor_val);
+        kieSession.insert(obj);
+        return Stream.empty(); // buffer until endPartition
+    }
+
+    public Stream<CommonDataResultSet> endPartition() {
+        kieSession.fireAllRules(); // fire once per partition
+        Collection<?> facts = kieSession.getObjects(o -> o instanceof CommonDataResultSet);
+        kieSession.dispose();
+        return facts.stream().map(f -> (CommonDataResultSet) f);
+    }
+
+    private KieContainer getContainerInstance() {
+        KieServices ks = KieServices.Factory.get();
+        return ks.getKieClasspathContainer();
+    }
+}
+
+
+
+
+<?xml version="1.0" encoding="UTF-8"?>
+<kmodule xmlns="http://www.drools.org/xsd/kmodule">
+  <kbase name="rulesKBase" packages="rules">
+    <ksession name="rulesKSession"/>
+  </kbase>
+</kmodule>
+
+
+
+
+
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
-  <modelVersion>4.0.0</modelVersion>
+    <modelVersion>4.0.0</modelVersion>
 
-  <groupId>com.example</groupId>
-  <artifactId>drools-databricks</artifactId>
-  <version>1.0</version>
+    <groupId>com.example</groupId>
+    <artifactId>drools-databricks</artifactId>
+    <version>1.0-SNAPSHOT</version>
 
-  <properties>
-    <maven.compiler.source>1.8</maven.compiler.source>
-    <maven.compiler.target>1.8</maven.compiler.target>
-    <drools.version>7.74.0.Final</drools.version>
-  </properties>
+    <properties>
+        <maven.compiler.source>1.8</maven.compiler.source>
+        <maven.compiler.target>1.8</maven.compiler.target>
+        <drools.version>7.74.0.Final</drools.version>
+    </properties>
 
-  <dependencies>
-    <!-- Drools -->
-    <dependency>
-      <groupId>org.drools</groupId>
-      <artifactId>drools-core</artifactId>
-      <version>${drools.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.drools</groupId>
-      <artifactId>drools-compiler</artifactId>
-      <version>${drools.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.kie</groupId>
-      <artifactId>kie-api</artifactId>
-      <version>${drools.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.kie</groupId>
-      <artifactId>kie-ci</artifactId>
-      <version>${drools.version}</version>
-    </dependency>
-    <!-- Logging -->
-    <dependency>
-      <groupId>ch.qos.logback</groupId>
-      <artifactId>logback-classic</artifactId>
-      <version>1.2.11</version>
-    </dependency>
-  </dependencies>
+    <dependencies>
+        <!-- Drools Core -->
+        <dependency>
+            <groupId>org.drools</groupId>
+            <artifactId>drools-core</artifactId>
+            <version>${drools.version}</version>
+        </dependency>
 
-  <build>
-    <plugins>
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-shade-plugin</artifactId>
-        <version>3.4.1</version>
-        <executions>
-          <execution>
-            <phase>package</phase>
-            <goals><goal>shade</goal></goals>
-            <configuration>
-              <createDependencyReducedPom>false</createDependencyReducedPom>
-              <transformers>
-                <!-- Include kmodule.xml -->
-                <transformer implementation="org.apache.maven.plugins.shade.resource.AppendingTransformer">
-                  <resource>META-INF/kmodule.xml</resource>
-                </transformer>
-                <!-- Merge service files -->
-                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
-              </transformers>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
-    </plugins>
-  </build>
+        <!-- Drools Compiler -->
+        <dependency>
+            <groupId>org.drools</groupId>
+            <artifactId>drools-compiler</artifactId>
+            <version>${drools.version}</version>
+        </dependency>
+
+        <!-- KIE API -->
+        <dependency>
+            <groupId>org.kie</groupId>
+            <artifactId>kie-api</artifactId>
+            <version>${drools.version}</version>
+        </dependency>
+
+        <!-- KIE CI -->
+        <dependency>
+            <groupId>org.kie</groupId>
+            <artifactId>kie-ci</artifactId>
+            <version>${drools.version}</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.4.1</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals><goal>shade</goal></goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>
+
+
+
