@@ -1,69 +1,93 @@
+# --- Clean reattach of a single fat JAR on a Databricks cluster ---
+# Prereqs:
+#   pip install databricks-sdk
+#   export DATABRICKS_HOST="https://<your-workspace>.azuredatabricks.net"
+#   export DATABRICKS_TOKEN="<your-PAT>"
+#
+# Fill these in:
+CLUSTER_ID   = "<your-cluster-id>"
+FAT_JAR_DBFS = "dbfs:/FileStore/jars/CommonDataObject-1.0.jar"   # path to your shaded jar
+
 import time
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.compute import Library
 
-w = WorkspaceClient(host=WORKSPACE_HOST)  # if you already set DATABRICKS_HOST/TOKEN, you can just do WorkspaceClient()
+w = WorkspaceClient()  # uses env vars for auth
 
-def wait_for_cluster_state(cluster_id: str, expect: str):
+# ---------- helpers ----------
+def wait_for_cluster(cluster_id: str, desired: str = "RUNNING"):
+    """Poll cluster state until it matches 'desired'."""
     while True:
         st = w.clusters.get(cluster_id).state.value
-        print("Cluster state:", st)
-        if st == expect:
+        print(f"[cluster] state = {st}")
+        if st == desired:
             return
         time.sleep(10)
 
-def wait_for_libs_resolved(cluster_id: str):
-    # poll the per-library status until all are RESOLVED
-    while True:
-        statuses = w.libraries.cluster_statuses().library_statuses or []
-        for s in statuses:
-            if s.cluster_id == cluster_id:
-                lib_states = [(ls.library, ls.status.value, (ls.messages or [])) for ls in (s.library_statuses or [])]
-                print("Library statuses:", [(l.jar or l.maven, st) for (l, st, _) in lib_states])
-                if all(st in ("INSTALLED", "RESOLVED") for (_, st, _) in lib_states):
-                    return
-        time.sleep(5)
-
 def uninstall_all_libs(cluster_id: str):
-    statuses = w.libraries.cluster_statuses().library_statuses or []
-    target = next((s for s in statuses if s.cluster_id == cluster_id), None)
-    if not target or not target.library_statuses:
-        print("No libraries attached.")
+    """Uninstall every library currently attached to the cluster."""
+    try:
+        status = w.libraries.cluster_status(cluster_id=cluster_id)
+    except Exception as e:
+        print(f"[libs] could not fetch cluster_status: {e}")
         return
-    # uninstall each lib we see
-    for ls in target.library_statuses:
+
+    items = list(status.library_statuses or [])
+    if not items:
+        print("[libs] no libraries attached.")
+        return
+
+    # Build uninstall list
+    to_uninstall = []
+    for ls in items:
         lib = ls.library
-        print("Uninstalling:", lib.jar or (lib.maven.coordinates if lib.maven else lib.egg or lib.whl))
-        w.libraries.uninstall(cluster_id=cluster_id, libraries=[lib])
+        # Human-readable label
+        label = lib.jar or (lib.maven.coordinates if lib.maven else lib.whl or lib.egg or "unknown-lib")
+        print(f"[libs] will uninstall: {label}")
+        to_uninstall.append(lib)
 
-    # wait until cluster reports no libs
-    while True:
-        statuses = w.libraries.cluster_statuses().library_statuses or []
-        target = next((s for s in statuses if s.cluster_id == cluster_id), None)
-        if not target or not target.library_statuses:
-            print("All libraries uninstalled.")
-            return
-        time.sleep(5)
+    if to_uninstall:
+        w.libraries.uninstall(cluster_id=cluster_id, libraries=to_uninstall)
+        print("[libs] uninstall request submitted.")
 
-# --- run the reset sequence ---
-print("Stopping notebooks using the cluster (if any) is recommended.")
+def print_current_libs(cluster_id: str, header: str):
+    try:
+        status = w.libraries.cluster_status(cluster_id=cluster_id)
+    except Exception as e:
+        print(f"[libs] {header} (error getting status): {e}")
+        return
+    items = list(status.library_statuses or [])
+    print(f"[libs] {header}: {len(items)} item(s)")
+    for ls in items:
+        lib = ls.library
+        label = lib.jar or (lib.maven.coordinates if lib.maven else lib.whl or lib.egg or "unknown-lib")
+        st    = ls.status.value if ls.status else "?"
+        print(f"        - {label}  [{st}]")
 
-print("\n1) Uninstall existing libraries …")
+# ---------- sequence ----------
+print_current_libs(CLUSTER_ID, "before uninstall")
+
+print("\n[step 1] uninstalling all libraries …")
 uninstall_all_libs(CLUSTER_ID)
 
-print("\n2) Restart cluster to clear classpath …")
+print("\n[step 2] restarting cluster to clear classpath …")
 w.clusters.restart(CLUSTER_ID)
-wait_for_cluster_state(CLUSTER_ID, "RUNNING")
+wait_for_cluster(CLUSTER_ID, "RUNNING")
 
-print("\n3) Install ONLY the fat jar …")
+print_current_libs(CLUSTER_ID, "after restart (should be empty or minimal)")
+
+print("\n[step 3] installing ONLY your fat jar …")
 w.libraries.install(
     cluster_id=CLUSTER_ID,
     libraries=[Library(jar=FAT_JAR_DBFS)]
 )
-wait_for_libs_resolved(CLUSTER_ID)
 
-print("\n4) Final cluster restart (ensures the driver picks up new classpath) …")
+# Give the agent a moment to record library status
+time.sleep(5)
+print_current_libs(CLUSTER_ID, "after install request")
+
+print("\n[step 4] final restart so the driver picks up the new classpath …")
 w.clusters.restart(CLUSTER_ID)
-wait_for_cluster_state(CLUSTER_ID, "RUNNING")
+wait_for_cluster(CLUSTER_ID, "RUNNING")
 
-print("\n✅ Clean attach done. Test in a Scala cell now.")
+print("\n✅ done. cluster is clean with only your fat JAR attached.")
