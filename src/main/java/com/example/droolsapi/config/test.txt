@@ -1,24 +1,18 @@
-// ---- visibility probe ----
-import java.sql.Date
-import scala.util.Try
+import zipfile, textwrap
 
-def canLoad(fqn: String) =
-  Try(Thread.currentThread.getContextClassLoader.loadClass(fqn)).toEither
+jar = "/dbfs/FileStore/jars/drools-streamlit-utils-0.0.1.jar"  # adjust if your name differs
 
-val probes = Seq(
-  "CommonDataObject.CommonDataModel",
-  "CommonDataObject.CommonDataResultSet",
-  "MyDroolsConfig",                     // default package (your current case)
-  "CommonDataObject.MyDroolsConfig",    // if you later add a package
-  "org.kie.api.KieServices",            // Drools present?
-  "org.kie.api.runtime.KieContainer"
-)
+with zipfile.ZipFile(jar) as z:
+    names = z.namelist()
 
-probes.foreach { fqn =>
-  println(f"$fqn%-40s -> ${canLoad(fqn).fold(e => s"NO (${e.getClass.getSimpleName})", _ => "OK")}")
-}
+print("Total entries:", len(names))
 
+# Show packages present (first few levels)
+pkgs = sorted({n.split("/")[0] for n in names if "/" in n})
+print("\nTop-level packages:\n", pkgs[:50])
 
-
-
-
+# Look for Drools/KIE
+hits = [n for n in names if n.startswith(("org/kie", "org/drools", "org/mvel", "META-INF/services"))]
+print(f"\nDrools/KIE-related entries found: {len(hits)}")
+for n in hits[:100]:
+    print(n)
