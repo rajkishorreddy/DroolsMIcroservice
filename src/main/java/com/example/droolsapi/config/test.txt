@@ -4,20 +4,20 @@ import time
 # Initialize client
 w = WorkspaceClient()
 
-CLUSTER_ID = "<your-cluster-id>"
+CLUSTER_ID = "8903-210552-4xcvb13"
 JAR_PATH = "dbfs:/FileStore/jars/CommonDataObject-1.0.jar"
 
 def uninstall_all_libs(cluster_id: str):
-    """Uninstall all libraries from cluster"""
-    libs = w.libraries.list(cluster_id)
-    for lib in libs:
-        print(f"Uninstalling {lib.library} ...")
-        w.libraries.uninstall(cluster_id=cluster_id, library=lib.library)
+    """Uninstall all libraries from the cluster"""
+    statuses = w.libraries.all_cluster_statuses(cluster_id)
+    for s in statuses.library_statuses or []:
+        print(f"Uninstalling {s.library} ...")
+        w.libraries.uninstall(cluster_id=cluster_id, library=s.library)
 
-    # Wait until all libraries are gone
+    # Wait until all libs are detached
     while True:
-        libs = w.libraries.list(cluster_id)
-        if not libs:  # clean
+        statuses = w.libraries.all_cluster_statuses(cluster_id)
+        if not statuses.library_statuses:
             print("✅ All libraries uninstalled.")
             break
         print("Waiting for libraries to detach...")
@@ -30,8 +30,9 @@ def install_fat_jar(cluster_id: str, jar_path: str):
 
     # Wait until it's active
     while True:
-        libs = w.libraries.list(cluster_id)
-        if libs and libs[0].status == "INSTALLED":
+        statuses = w.libraries.all_cluster_statuses(cluster_id)
+        libs = statuses.library_statuses or []
+        if any(l.status == "INSTALLED" for l in libs):
             print(f"✅ JAR {jar_path} installed successfully")
             break
         print("Waiting for JAR to be installed...")
