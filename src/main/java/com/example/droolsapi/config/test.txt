@@ -1,142 +1,104 @@
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
-  <modelVersion>4.0.0</modelVersion>
+# --- Build rows that match your rule + a negative control ---
+from datetime import date, timedelta
+today = date.today()
+inside_90d = today - timedelta(days=60)
 
-  <groupId>org.example</groupId>
-  <artifactId>drools-databricks</artifactId>
-  <version>1.0.0</version>
+rows = [
+    # INDV 1 — SCORE fact (matches first half)
+    (1,  None, 1.0, 45, "INDV_SCOR_FACT",
+     None, None,
+     "FUT_RSK_IN", 3.5,
+     123, None, None, "TX", "SEGI",
+     None, None, "RULECD",
+     None, None, None,
+     None, "SCN",
+     None, 0,
+     None, None, None,
+     None, None, None, 0.0, 0.0),
 
-  <properties>
-    <maven.compiler.source>1.8</maven.compiler.source>
-    <maven.compiler.target>1.8</maven.compiler.target>
-    <drools.version>7.74.0.Final</drools.version>
-  </properties>
+    # INDV 1 — LAB fact (elem 478 within 90d; satisfies exists(...))
+    (1,  478, 1.0, 45, "INDV_ELEMENTS_LAB",
+     inside_90d, None,
+     None, None,
+     123, None, None, "TX", "SEGI",
+     None, None, "RULECD",
+     None, None, None,
+     None, "SCN",
+     None, 0,
+     None, None, None,
+     None, None, None, 0.0, 0.0),
 
-  <dependencies>
-    <dependency>
-      <groupId>org.drools</groupId>
-      <artifactId>drools-core</artifactId>
-      <version>${drools.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.drools</groupId>
-      <artifactId>drools-compiler</artifactId>
-      <version>${drools.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.kie</groupId>
-      <artifactId>kie-api</artifactId>
-      <version>${drools.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.kie</groupId>
-      <artifactId>kie-ci</artifactId>
-      <version>${drools.version}</version>
-    </dependency>
-  </dependencies>
-
-  <build>
-    <plugins>
-      <!-- one self-contained jar with service descriptors merged -->
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-shade-plugin</artifactId>
-        <version>3.4.1</version>
-        <executions>
-          <execution>
-            <phase>package</phase>
-            <goals><goal>shade</goal></goals>
-            <configuration>
-              <createDependencyReducedPom>false</createDependencyReducedPom>
-              <filters>
-                <filter>
-                  <artifact>*:*</artifact>
-                  <!-- keep class files + rules + META-INF/services -->
-                  <includes>
-                    <include>**/*.class</include>
-                    <include>rules/**</include>
-                    <include>META-INF/services/**</include>
-                  </includes>
-                </filter>
-              </filters>
-              <transformers>
-                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
-              </transformers>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
-    </plugins>
-  </build>
-</project>
+    # INDV 2 — non-match (low score, no lab)
+    (2,  None, 1.0, 38, "INDV_SCOR_FACT",
+     None, None,
+     "FUT_RSK_IN", 2.0,
+     456, None, None, "CA", "SEG2",
+     None, None, "RULEXY",
+     None, None, None,
+     None, "SCN",
+     None, 0,
+     None, None, None,
+     None, None, None, 0.0, 0.0),
+]
 
 
+jvm = spark._jvm
+CDM = jvm.org.example.drools.CommonDataModel
 
+# Boxed types
+JInt    = jvm.java.lang.Integer
+JDouble = jvm.java.lang.Double
+JString = jvm.java.lang.String  # not strictly needed; Python str -> java.lang.String
+JDate   = jvm.java.sql.Date
 
-<?xml version="1.0" encoding="UTF-8"?>
-<kmodule xmlns="http://www.drools.org/xsd/kmodule">
-  <!-- loads all .drl files under resources/rules -->
-  <kbase name="rulesKBase" packages="rules">
-    <ksession name="rulesKSession"/>
-  </kbase>
-</kmodule>
+def to_jdate(py):
+    return None if py is None else JDate.valueOf(py.isoformat())
 
+def mk_cdm(t):
+    (indv_id, elem_nbr, elem_qty, age, mem_name,
+     elem_dt_1, elem_dt_2,
+     scor_typ_cd, scor_val,
+     prg_srvc_id, trn_dt, eff_dt, st_abbr_cd, optum_seg_id,
+     id_run_dt, outbound_file_id, scen_rule_cd,
+     dob, effective_date, end_date,
+     med_dx_of_interest, scenario_cd,
+     next_effective_date, grace_period,
+     min_eff_date, max_end_date, final_end_date,
+     adt_chief_complaint, elem_sup, continuity, med_cov, rel_iprnt_risk_12_mo_nbr) = t
 
-
-
-
-package org.example.drools;
-
-import org.kie.api.runtime.KieContainer;
-import org.kie.api.runtime.KieServices;
-import org.kie.api.runtime.KieSession;
-
-import java.sql.Date;
-import java.util.Collection;
-import java.util.stream.Stream;
-
-public class GenericExecutor {
-
-    private boolean first = true;
-    private KieSession kieSession = null;
-
-    /** call once per row inside a Spark partition */
-    public Stream<CommonDataResultSet> process(Integer indv_id, Integer elem_nbr,
-                                               Double elem_qty, Integer age,
-                                               String mem_name, Date elem_dt_1,
-                                               Date elem_dt_2, String scor_typ_cd,
-                                               Double scor_val) {
-        if (first) {
-            // session name from kmodule.xml
-            kieSession = getContainer().newKieSession("rulesKSession");
-            first = false;
-        }
-        CommonDataModel fact = new CommonDataModel(indv_id, elem_nbr, elem_qty, age,
-                                                   mem_name, elem_dt_1, elem_dt_2,
-                                                   scor_typ_cd, scor_val);
-        kieSession.insert(fact);
-        return Stream.empty(); // buffer until endPartition()
-    }
-
-    /** call once at the end of the Spark partition */
-    public Stream<CommonDataResultSet> endPartition() {
-        if (kieSession == null) return Stream.empty();
-        kieSession.fireAllRules();
-        Collection<?> results = kieSession.getObjects(o -> o instanceof CommonDataResultSet);
-        kieSession.dispose();
-        return results.stream().map(o -> (CommonDataResultSet) o);
-    }
-
-    private static KieContainer getContainer() {
-        KieServices ks = KieServices.Factory.get();
-        return ks.getKieClasspathContainer();
-    }
-}
-
-
-
-
-
+    return CDM(
+        JInt(indv_id) if indv_id is not None else None,
+        JInt(elem_nbr) if elem_nbr is not None else None,
+        JDouble(elem_qty) if elem_qty is not None else None,
+        JInt(age) if age is not None else None,
+        mem_name,
+        to_jdate(elem_dt_1),
+        to_jdate(elem_dt_2),
+        scor_typ_cd,
+        JDouble(scor_val) if scor_val is not None else None,
+        JInt(prg_srvc_id) if prg_srvc_id is not None else None,
+        to_jdate(trn_dt),
+        to_jdate(eff_dt),
+        st_abbr_cd,
+        optum_seg_id,
+        to_jdate(id_run_dt),
+        JInt(outbound_file_id) if outbound_file_id is not None else None,
+        scen_rule_cd,
+        to_jdate(dob),
+        to_jdate(effective_date),
+        to_jdate(end_date),
+        med_dx_of_interest,
+        scenario_cd,
+        to_jdate(next_effective_date),
+        JInt(grace_period) if grace_period is not None else None,
+        to_jdate(min_eff_date),
+        to_jdate(max_end_date),
+        to_jdate(final_end_date),
+        adt_chief_complaint,
+        elem_sup,
+        continuity,
+        JDouble(med_cov) if med_cov is not None else None,
+        JDouble(rel_iprnt_risk_12_mo_nbr) if rel_iprnt_risk_12_mo_nbr is not None else None
+    )
 
 
