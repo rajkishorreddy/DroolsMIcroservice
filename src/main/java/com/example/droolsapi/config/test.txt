@@ -1,18 +1,49 @@
-import zipfile, textwrap
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-shade-plugin</artifactId>
+      <version>3.4.1</version>
+      <executions>
+        <execution>
+          <phase>package</phase>
+          <goals>
+            <goal>shade</goal>
+          </goals>
+          <configuration>
+            <createDependencyReducedPom>false</createDependencyReducedPom>
+            <transformers>
+              <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                <mainClass>your.main.Class</mainClass>
+              </transformer>
+            </transformers>
+          </configuration>
+        </execution>
+      </executions>
+    </plugin>
+  </plugins>
+</build>
 
-jar = "/dbfs/FileStore/jars/drools-streamlit-utils-0.0.1.jar"  # adjust if your name differs
 
-with zipfile.ZipFile(jar) as z:
-    names = z.namelist()
 
-print("Total entries:", len(names))
 
-# Show packages present (first few levels)
-pkgs = sorted({n.split("/")[0] for n in names if "/" in n})
-print("\nTop-level packages:\n", pkgs[:50])
-
-# Look for Drools/KIE
-hits = [n for n in names if n.startswith(("org/kie", "org/drools", "org/mvel", "META-INF/services"))]
-print(f"\nDrools/KIE-related entries found: {len(hits)}")
-for n in hits[:100]:
-    print(n)
+<dependency>
+  <groupId>org.drools</groupId>
+  <artifactId>drools-core</artifactId>
+  <version>8.44.0.Final</version>
+</dependency>
+<dependency>
+  <groupId>org.drools</groupId>
+  <artifactId>drools-compiler</artifactId>
+  <version>8.44.0.Final</version>
+</dependency>
+<dependency>
+  <groupId>org.kie</groupId>
+  <artifactId>kie-api</artifactId>
+  <version>8.44.0.Final</version>
+</dependency>
+<dependency>
+  <groupId>org.mvel</groupId>
+  <artifactId>mvel2</artifactId>
+  <version>2.5.0.Final</version>
+</dependency>
