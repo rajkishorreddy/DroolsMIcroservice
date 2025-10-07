@@ -10,3 +10,12 @@ val checks = Seq(
   "MyDroolsConfig"                           // fallback if still in default package
 )
 checks.foreach(f => println(f.padTo(45,' ') + " -> " + canLoad(f)))
+
+
+
+import zipfile
+
+jar = "/dbfs/FileStore/jars/CommonDataObject-1.0.jar"
+with zipfile.ZipFile(jar, "r") as z:
+    entries = [n for n in z.namelist() if "MyDroolsConfig" in n or "CommonDataObject" in n or "kie" in n]
+    print(entries[:50])
