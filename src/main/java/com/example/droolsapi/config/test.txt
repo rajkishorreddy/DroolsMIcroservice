@@ -1,31 +1,69 @@
-%scala
+// CELL 1 — env + resources exist?
+import scala.util.Try
+
 def find(name: String) =
   Option(Thread.currentThread.getContextClassLoader.getResource(name))
     .map(_.toString).getOrElse("MISSING")
 
-println("kmodule.xml  => " + find("META-INF/kmodule.xml"))
-println("KieServices  => " + find("META-INF/services/org.kie.api.KieServices"))
-println("KieContainer => " + find("META-INF/services/org.kie.api.runtime.KieContainer"))  // may be absent depending on version
-println("rules folder => " + find("rules/A1CIPRiskRule.drl"))  // adjust if your file name differs
+println("java.version     = " + System.getProperty("java.version"))
+println("kmodule.xml      = " + find("META-INF/kmodule.xml"))
+println("KieServices svc  = " + find("META-INF/services/org.kie.api.KieServices"))
+println("rules sample drl = " + find("rules/AICIPRiskRule.drl"))
 
 
-
-%scala
+// CELL 2 — raw ServiceLoader probe
 import org.kie.api.KieServices
+val cl = Thread.currentThread.getContextClassLoader
+val sl = java.util.ServiceLoader.load(classOf[KieServices], cl)
+val it = sl.iterator()
 
-try {
-  val ks = KieServices.Factory.get()
-  println(s"ks => $ks")
-  val kc = ks.getKieClasspathContainer()
-  println("kBases: " + kc.getKieBaseNames)
-  val ksession = kc.newKieSession("rulesKSession")  // name from your kmodule.xml
-  println("ksession OK -> " + ksession)
-  ksession.dispose()
-} catch {
-  case t: Throwable =>
-    t.printStackTrace()
+println("ServiceLoader.hasNext = " + it.hasNext)
+while (it.hasNext) {
+  val svc = it.next()
+  println("Service impl => " + svc.getClass.getName)
 }
 
 
+
+
+// CELL 3 — show *driver* classpath jars
+System.getProperty("java.class.path").split(":").foreach(println)
+
+
+
+
+// CELL 4 — instantiate KieServicesImpl directly
+val implName = "org.drools.compiler.kie.builder.impl.KieServicesImpl"
+val ksDirect =
+  Class.forName(implName, true, Thread.currentThread.getContextClassLoader)
+       .getDeclaredConstructor()
+       .newInstance()
+       .asInstanceOf[org.kie.api.KieServices]
+
+println("ksDirect = " + ksDirect)
+val kc = ksDirect.getKieClasspathContainer()
+println("kBases  = " + kc.getKieBaseNames)
+val ksession = kc.newKieSession("rulesKSession")  // name from your kmodule.xml
+println("ksession OK => " + ksession)
+ksession.dispose()
+
+
+
+// CELL 5 — force Factory to use the impl during this JVM lifetime
+System.setProperty("org.kie.api.KieServices", "org.drools.compiler.kie.builder.impl.KieServicesImpl")
+
+import org.kie.api.KieServices
+val ks = KieServices.Factory.get()
+println("Factory.get() => " + ks)
+val kc = ks.getKieClasspathContainer()
+println("kBases  = " + kc.getKieBaseNames)
+val ksession = kc.newKieSession("rulesKSession")
+println("ksession OK => " + ksession)
+ksession.dispose()
+
+
+
+
+System.setProperty("org.kie.api.KieServices","org.drools.compiler.kie.builder.impl.KieServicesImpl")
 
 
