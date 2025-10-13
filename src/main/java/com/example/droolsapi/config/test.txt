@@ -67,3 +67,27 @@ ksession.dispose()
 System.setProperty("org.kie.api.KieServices","org.drools.compiler.kie.builder.impl.KieServicesImpl")
 
 
+
+
+
+
+
+// === Reset Drools classloader ===
+import org.kie.api.KieServices
+import org.drools.compiler.kie.builder.impl.KieServicesImpl
+
+val loader = classOf[KieServicesImpl].getClassLoader
+Thread.currentThread().setContextClassLoader(loader)
+
+println("Set Drools context classloader => " + loader)
+
+// === Now initialize Drools ===
+val ks = KieServices.Factory.get()
+println("Factory.get() => " + ks)
+
+val kc = ks.getKieClasspathContainer()
+println("KieBases => " + kc.getKieBaseNames)
+val ksession = kc.newKieSession("rulesKSession")
+println("Session => " + ksession)
+ksession.dispose()
+
