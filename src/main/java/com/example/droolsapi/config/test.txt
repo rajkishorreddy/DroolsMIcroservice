@@ -1,115 +1,20 @@
-// CELL 1 — env + resources exist?
-import scala.util.Try
-
-def find(name: String) =
-  Option(Thread.currentThread.getContextClassLoader.getResource(name))
-    .map(_.toString).getOrElse("MISSING")
-
-println("java.version     = " + System.getProperty("java.version"))
-println("kmodule.xml      = " + find("META-INF/kmodule.xml"))
-println("KieServices svc  = " + find("META-INF/services/org.kie.api.KieServices"))
-println("rules sample drl = " + find("rules/AICIPRiskRule.drl"))
-
-
-// CELL 2 — raw ServiceLoader probe
-import org.kie.api.KieServices
-val cl = Thread.currentThread.getContextClassLoader
-val sl = java.util.ServiceLoader.load(classOf[KieServices], cl)
-val it = sl.iterator()
-
-println("ServiceLoader.hasNext = " + it.hasNext)
-while (it.hasNext) {
-  val svc = it.next()
-  println("Service impl => " + svc.getClass.getName)
-}
-
-
-
-
-// CELL 3 — show *driver* classpath jars
-System.getProperty("java.class.path").split(":").foreach(println)
-
-
-
-
-// CELL 4 — instantiate KieServicesImpl directly
-val implName = "org.drools.compiler.kie.builder.impl.KieServicesImpl"
-val ksDirect =
-  Class.forName(implName, true, Thread.currentThread.getContextClassLoader)
-       .getDeclaredConstructor()
-       .newInstance()
-       .asInstanceOf[org.kie.api.KieServices]
-
-println("ksDirect = " + ksDirect)
-val kc = ksDirect.getKieClasspathContainer()
-println("kBases  = " + kc.getKieBaseNames)
-val ksession = kc.newKieSession("rulesKSession")  // name from your kmodule.xml
-println("ksession OK => " + ksession)
-ksession.dispose()
-
-
-
-// CELL 5 — force Factory to use the impl during this JVM lifetime
-System.setProperty("org.kie.api.KieServices", "org.drools.compiler.kie.builder.impl.KieServicesImpl")
-
-import org.kie.api.KieServices
-val ks = KieServices.Factory.get()
-println("Factory.get() => " + ks)
-val kc = ks.getKieClasspathContainer()
-println("kBases  = " + kc.getKieBaseNames)
-val ksession = kc.newKieSession("rulesKSession")
-println("ksession OK => " + ksession)
-ksession.dispose()
-
-
-
-
-System.setProperty("org.kie.api.KieServices","org.drools.compiler.kie.builder.impl.KieServicesImpl")
-
-
-
-
-
-
-
-// === Reset Drools classloader ===
-import org.kie.api.KieServices
-import org.drools.compiler.kie.builder.impl.KieServicesImpl
-
-val loader = classOf[KieServicesImpl].getClassLoader
-Thread.currentThread().setContextClassLoader(loader)
-
-println("Set Drools context classloader => " + loader)
-
-// === Now initialize Drools ===
-val ks = KieServices.Factory.get()
-println("Factory.get() => " + ks)
-
-val kc = ks.getKieClasspathContainer()
-println("KieBases => " + kc.getKieBaseNames)
-val ksession = kc.newKieSession("rulesKSession")
-println("Session => " + ksession)
-ksession.dispose()
-
-
-
-
-
-
-
+%scala
 import org.kie.api.KieServices
 import org.drools.compiler.kie.builder.impl.KieServicesImpl
 import org.kie.api.runtime.KieContainer
 
-// 1️⃣  Explicitly create the impl
+// step 1: check which classloader can see the XML
+val ctxCl = Thread.currentThread().getContextClassLoader
+val droolsCl = classOf[KieServicesImpl].getClassLoader
+
+println("Context loader kmodule.xml => " + ctxCl.getResource("META-INF/kmodule.xml"))
+println("Drools loader kmodule.xml  => " + droolsCl.getResource("META-INF/kmodule.xml"))
+
+// step 2: if droolsCl can see it, use that loader
 val ks = new KieServicesImpl()
-println("Manually created KieServicesImpl = " + ks)
+val kc = ks.getKieClasspathContainer(droolsCl)
+println("KieBases => " + kc.getKieBaseNames)
 
-// 2️⃣  Get a container
-val kc: KieContainer = ks.getKieClasspathContainer()
-println("KieBases = " + kc.getKieBaseNames)
-
-// 3️⃣  Create a session from kmodule.xml
 val ksession = kc.newKieSession("rulesKSession")
-println("KieSession OK = " + ksession)
+println("KieSession OK => " + ksession)
 ksession.dispose()
