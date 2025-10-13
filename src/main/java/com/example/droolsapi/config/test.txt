@@ -1,30 +1,31 @@
-from datetime import date
+%scala
+def find(name: String) =
+  Option(Thread.currentThread.getContextClassLoader.getResource(name))
+    .map(_.toString).getOrElse("MISSING")
 
-gx = spark._jvm.org.example.drools.GenericExecutor()
+println("kmodule.xml  => " + find("META-INF/kmodule.xml"))
+println("KieServices  => " + find("META-INF/services/org.kie.api.KieServices"))
+println("KieContainer => " + find("META-INF/services/org.kie.api.runtime.KieContainer"))  // may be absent depending on version
+println("rules folder => " + find("rules/A1CIPRiskRule.drl"))  // adjust if your file name differs
 
-# 1 test row to hit A1CIPRiskRule
-rows = [
-    (
-        1,              # indv_id
-        478,            # elem_nbr -> matches rule
-        1.0,            # elem_qty
-        45,             # age
-        "INDV_SCOR_FACT", # mem_name -> matches rule
-        date(2025,1,1), # elem_dt_1
-        date(2025,2,1), # elem_dt_2
-        "FUT_RSK_IN",   # scor_typ_cd -> matches
-        3.5,            # scor_val >= 3.0
-        "codeX", "2025-01-01", "2025-01-15", "ST1", "SEG1",
-        "2025-01-10", "2025-01-20", "RULE1", "1990-01-01",
-        "2025-02-01", "2025-03-01", "DX1", "SCN1", "2025-02-15",
-        123, "2025-01-01", "2025-05-01", "complaint", "supX",
-        "cont", "medcov", 1.1, 2.2
-    )
-]
 
-for row in rows:
-    gx.process(*row)
 
-results = gx.endPartition().toArray()
-for r in results:
-    print("STATUS =", r.getStatus())
+%scala
+import org.kie.api.KieServices
+
+try {
+  val ks = KieServices.Factory.get()
+  println(s"ks => $ks")
+  val kc = ks.getKieClasspathContainer()
+  println("kBases: " + kc.getKieBaseNames)
+  val ksession = kc.newKieSession("rulesKSession")  // name from your kmodule.xml
+  println("ksession OK -> " + ksession)
+  ksession.dispose()
+} catch {
+  case t: Throwable =>
+    t.printStackTrace()
+}
+
+
+
+
