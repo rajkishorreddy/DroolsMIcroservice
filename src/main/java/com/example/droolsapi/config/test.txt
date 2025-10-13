@@ -91,3 +91,25 @@ val ksession = kc.newKieSession("rulesKSession")
 println("Session => " + ksession)
 ksession.dispose()
 
+
+
+
+
+
+
+import org.kie.api.KieServices
+import org.drools.compiler.kie.builder.impl.KieServicesImpl
+import org.kie.api.runtime.KieContainer
+
+// 1️⃣  Explicitly create the impl
+val ks = new KieServicesImpl()
+println("Manually created KieServicesImpl = " + ks)
+
+// 2️⃣  Get a container
+val kc: KieContainer = ks.getKieClasspathContainer()
+println("KieBases = " + kc.getKieBaseNames)
+
+// 3️⃣  Create a session from kmodule.xml
+val ksession = kc.newKieSession("rulesKSession")
+println("KieSession OK = " + ksession)
+ksession.dispose()
