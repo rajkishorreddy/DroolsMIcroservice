@@ -136,3 +136,67 @@ public class DroolsBridge {
         return result;
     }
 }
+
+
+
+
+
+from pyspark.sql import functions as F, types as T
+import hashlib, os
+
+# 1) Read DRLs from DBFS
+drl_dir = "/dbfs/FileStore/rules"
+drl_bodies = []
+for fn in os.listdir(drl_dir):
+    if fn.endswith(".drl"):
+        with open(os.path.join(drl_dir, fn), "r", encoding="utf-8") as f:
+            drl_bodies.append(f.read())
+
+# 2) Bundle id (so executors cache per ruleset)
+bundle_id = hashlib.sha1(("".join(sorted(drl_bodies))).encode("utf-8")).hexdigest()
+
+# 3) Ensure the bridge class is visible
+jvm = spark._jvm
+Bridge = jvm.com.example.DroolsBridge
+
+# 4) Compile/cached per executor JVM
+spark.range(1).rdd.foreachPartition(lambda _: Bridge.loadBundle(bundle_id, drl_bodies))
+
+# 5) Demo DF
+schema = T.StructType([
+    T.StructField("indvId", T.LongType(), False),
+    T.StructField("attrA",  T.StringType(), True),
+    T.StructField("amount", T.DoubleType(), True),
+])
+df = spark.createDataFrame([
+    (101, "X", 500.0),
+    (102, "Y", 1200.5),
+    (103, "X", 50.0),
+], schema)
+
+# 6) UDF that calls Drools (session reused via bundle_id)
+@F.udf(T.StructType([
+    T.StructField("ruleNum",  T.StringType(), True),
+    T.StructField("ruleFlag", T.StringType(), True),
+    T.StructField("isActive", T.BooleanType(), True),
+]))
+def run_rules(indvId, attrA, amount):
+    m = {
+        "indvId": int(indvId) if indvId is not None else None,
+        "attrA": attrA,
+        "amount": float(amount) if amount is not None else None
+    }
+    res = Bridge.exec(bundle_id, m)  # java.util.Map -> Py4J-mappable
+    return {
+        "ruleNum":  res.get("ruleNum") if res else None,
+        "ruleFlag": res.get("ruleFlag") if res else None,
+        "isActive": bool(res.get("isActive")) if res and res.get("isActive") is not None else False
+    }
+
+out = df.withColumn("res", run_rules("indvId","attrA","amount")) \
+        .select("indvId",
+                F.col("res.ruleNum").alias("ruleNum"),
+                F.col("res.ruleFlag").alias("ruleFlag"),
+                F.col("res.isActive").alias("isActive"))
+
+out.show(truncate=False)
