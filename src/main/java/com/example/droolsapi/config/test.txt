@@ -1,69 +1,8 @@
-from pyspark.sql import functions as F, types as T
-from pyspark import TaskContext
-import hashlib, os
+databricks libraries install --cluster-id <CLUSTER_ID> \
+  --maven-coordinates org.drools:drools-core:7.74.1.Final
 
-# ---- 1. Load DRL text ----
-drl_dir = "/dbfs/FileStore/rules"
-drl_bodies = []
-for fn in os.listdir(drl_dir):
-    if fn.endswith(".drl"):
-        with open(os.path.join(drl_dir, fn), "r", encoding="utf-8") as f:
-            drl_bodies.append(f.read())
+databricks libraries install --cluster-id <CLUSTER_ID> \
+  --maven-coordinates org.drools:drools-compiler:7.74.1.Final
 
-bundle_id = hashlib.sha1(("".join(sorted(drl_bodies))).encode("utf-8")).hexdigest()
-
-# ---- 2. Broadcast data only ----
-drl_bodies_bc = spark.sparkContext.broadcast(drl_bodies)
-bundle_id_bc  = spark.sparkContext.broadcast(bundle_id)
-
-# ---- 3. Compile Drools rules on executors ----
-def _load_on_exec(_):
-    jvm = TaskContext.get()._get_jvm()
-    jvm.com.example.DroolsBridge.loadBundle(bundle_id_bc.value, drl_bodies_bc.value)
-    return iter([])
-
-spark.range(1).rdd.foreachPartition(_load_on_exec)
-
-# ---- 4. Demo DataFrame ----
-schema = T.StructType([
-    T.StructField("indvId", T.LongType(), False),
-    T.StructField("attrA",  T.StringType(), True),
-    T.StructField("amount", T.DoubleType(), True),
-])
-df = spark.createDataFrame([
-    (101, "X", 500.0),
-    (102, "Y", 1200.5),
-    (103, "X", 50.0),
-], schema)
-
-# ---- 5. Define UDF (reacquire JVM inside) ----
-@F.udf(T.StructType([
-    T.StructField("ruleNum",  T.StringType(), True),
-    T.StructField("ruleFlag", T.StringType(), True),
-    T.StructField("isActive", T.BooleanType(), True),
-]))
-def run_rules(indvId, attrA, amount):
-    from pyspark import TaskContext
-    jvm = TaskContext.get()._get_jvm()
-    Bridge = jvm.com.example.DroolsBridge
-
-    m = {
-        "indvId": int(indvId) if indvId is not None else None,
-        "attrA": attrA,
-        "amount": float(amount) if amount is not None else None
-    }
-    res = Bridge.exec(bundle_id_bc.value, m)
-    return {
-        "ruleNum":  res.get("ruleNum") if res else None,
-        "ruleFlag": res.get("ruleFlag") if res else None,
-        "isActive": bool(res.get("isActive")) if res and res.get("isActive") is not None else False
-    }
-
-# ---- 6. Apply and show ----
-out = df.withColumn("res", run_rules("indvId","attrA","amount")) \
-        .select("indvId",
-                F.col("res.ruleNum").alias("ruleNum"),
-                F.col("res.ruleFlag").alias("ruleFlag"),
-                F.col("res.isActive").alias("isActive"))
-
-out.show(truncate=False)op
+databricks libraries install --cluster-id <CLUSTER_ID> \
+  --maven-coordinates org.kie:kie-api:7.74.1.Final
