@@ -1,20 +1,138 @@
-%scala
-import org.kie.api.KieServices
-import org.drools.compiler.kie.builder.impl.KieServicesImpl
-import org.kie.api.runtime.KieContainer
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>drools-bridge</artifactId>
+  <version>1.0.0</version>
 
-// step 1: check which classloader can see the XML
-val ctxCl = Thread.currentThread().getContextClassLoader
-val droolsCl = classOf[KieServicesImpl].getClassLoader
+  <properties>
+    <maven.compiler.source>1.8</maven.compiler.source>
+    <maven.compiler.target>1.8</maven.compiler.target>
+    <!-- Use a stable 7.x that supports Java 8 -->
+    <drools.version>7.74.1.Final</drools.version>
+  </properties>
 
-println("Context loader kmodule.xml => " + ctxCl.getResource("META-INF/kmodule.xml"))
-println("Drools loader kmodule.xml  => " + droolsCl.getResource("META-INF/kmodule.xml"))
+  <dependencies>
+    <dependency>
+      <groupId>org.drools</groupId>
+      <artifactId>drools-core</artifactId>
+      <version>${drools.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.drools</groupId>
+      <artifactId>drools-compiler</artifactId>
+      <version>${drools.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.kie</groupId>
+      <artifactId>kie-api</artifactId>
+      <version>${drools.version}</version>
+    </dependency>
+  </dependencies>
 
-// step 2: if droolsCl can see it, use that loader
-val ks = new KieServicesImpl()
-val kc = ks.getKieClasspathContainer(droolsCl)
-println("KieBases => " + kc.getKieBaseNames)
+  <build>
+    <plugins>
+      <!-- Build an uber-jar so executors have everything -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <version>3.5.1</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals><goal>shade</goal></goals>
+            <configuration>
+              <createDependencyReducedPom>false</createDependencyReducedPom>
+              <filters>
+                <filter>
+                  <artifact>*:*</artifact>
+                  <excludes>
+                    <exclude>META-INF/*.SF</exclude>
+                    <exclude>META-INF/*.DSA</exclude>
+                    <exclude>META-INF/*.RSA</exclude>
+                  </excludes>
+                </filter>
+              </filters>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
 
-val ksession = kc.newKieSession("rulesKSession")
-println("KieSession OK => " + ksession)
-ksession.dispose()
+
+
+
+
+
+
+
+package com.example;
+
+import org.kie.api.KieServices;
+import org.kie.api.builder.KieBuilder;
+import org.kie.api.builder.KieFileSystem;
+import org.kie.api.builder.Message;
+import org.kie.api.builder.Results;
+import org.kie.api.runtime.KieContainer;
+import org.kie.api.runtime.StatelessKieSession;
+import org.kie.internal.io.ResourceFactory;
+
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.ArrayList;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * Java 8–compatible bridge for Drools 7.x.
+ * Compile DRLs once per executor (cached), execute per row.
+ */
+public class DroolsBridge {
+
+    private static final Map<String, StatelessKieSession> SESSION_CACHE = new ConcurrentHashMap<String, StatelessKieSession>();
+
+    public static synchronized String loadBundle(String bundleId, List<String> drlBodies) {
+        if (SESSION_CACHE.containsKey(bundleId)) return "OK(CACHED)";
+
+        KieServices ks = KieServices.Factory.get();
+        KieFileSystem kfs = ks.newKieFileSystem();
+
+        int idx = 0;
+        for (String body : drlBodies) {
+            kfs.write(
+                ResourceFactory.newByteArrayResource(body.getBytes(StandardCharsets.UTF_8))
+                               .setSourcePath("rules/rule_" + (idx++) + ".drl")
+            );
+        }
+
+        KieBuilder kb = ks.newKieBuilder(kfs).buildAll();
+        Results results = kb.getResults();
+        if (results.hasMessages(Message.Level.ERROR)) {
+            throw new IllegalStateException("Drools build errors: " + results.getMessages(Message.Level.ERROR));
+        }
+
+        KieContainer kc = ks.newKieContainer(ks.getRepository().getDefaultReleaseId());
+        StatelessKieSession stateless = kc.getKieBase().newStatelessKieSession();
+        SESSION_CACHE.put(bundleId, stateless);
+        return "OK";
+    }
+
+    public static Map<String, Object> exec(String bundleId, Map<String, Object> fact) {
+        StatelessKieSession s = SESSION_CACHE.get(bundleId);
+        if (s == null) {
+            throw new IllegalStateException("No session for bundleId=" + bundleId + ". Call loadBundle() first.");
+        }
+        Map<String, Object> result = new HashMap<String, Object>();
+        s.setGlobal("result", result);
+
+        ArrayList<Object> facts = new ArrayList<Object>();
+        facts.add(fact);
+        facts.add(result); // optional: rules can also mutate this
+
+        s.execute(facts);
+        return result;
+    }
+}
