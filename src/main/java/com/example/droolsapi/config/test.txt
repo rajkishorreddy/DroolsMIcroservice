@@ -1,1 +1,1 @@
-keytool -list -v -keystore ~/secrets/kafka/keystore.jks -storepass prmcert | egrep 'Alias name:|Entry type:|Certificate chain length:'
+echo "ssl.endpoint.identification.algorithm=" >> ~/secrets/kafka/client.properties
