@@ -1,8 +1,5 @@
-%scala
-println("---- Driver classpath JARs ----")
-java.lang.ClassLoader.getSystemClassLoader
-  .asInstanceOf[java.net.URLClassLoader]
-  .getURLs
-  .map(_.getPath)
-  .sorted
-  .foreach(println)
+# 1) TCP reachability
+nc -vz eligibility-cdb-non-prod-kafka-1-client.svc.prod-us.gcp.extscloud.com 16621
+
+# 2) TLS handshake (will likely fail on client cert, but should CONNECT if reachable)
+openssl s_client -connect eligibility-cdb-non-prod-kafka-1-client.svc.prod-us.gcp.extscloud.com:16621 -servername eligibility-cdb-non-prod-kafka-1-client.svc.prod-us.gcp.extscloud.com -brief
