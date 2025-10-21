@@ -1,6 +1,1 @@
-export KAFKA_HEAP_OPTS="-Xmx1G" && \
-kafka-topics \
-  --bootstrap-server eligibility-cdb-non-prod-kafka-1-client.svc.prod-us.gcp.extscloud.com:16621,eligibility-cdb-non-prod-kafka-2-client.svc.prod-us.gcp.extscloud.com:16621 \
-  --describe \
-  --topic evisor.cdb.systest.alpha.v14 \
-  --command-config ~/secrets/kafka/client.properties
+keytool -list -v -keystore ~/secrets/kafka/keystore.p12 -storetype PKCS12 -storepass prmcert | egrep "Alias name:|Owner:|Issuer:"
