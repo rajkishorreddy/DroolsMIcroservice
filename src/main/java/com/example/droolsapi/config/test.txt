@@ -1,5 +1,6 @@
-keytool -importkeystore \
-  -srckeystore ~/secrets/kafka/keystore.jks \
-  -destkeystore ~/secrets/kafka/keystore.p12 \
-  -srcstoretype JKS -deststoretype PKCS12 \
-  -srcstorepass prmcert -deststorepass prmcert
+cp ~/secrets/kafka/client.properties ~/secrets/kafka/client.properties.bak
+
+sed -i '' 's#^ssl.keystore.location=.*#ssl.keystore.location=/Users/beeravalli_reddy@optum.com/secrets/kafka/keystore.p12#' ~/secrets/kafka/client.properties
+sed -i '' 's#^ssl.keystore.type=.*#ssl.keystore.type=PKCS12#' ~/secrets/kafka/client.properties
+
+cat ~/secrets/kafka/client.properties
