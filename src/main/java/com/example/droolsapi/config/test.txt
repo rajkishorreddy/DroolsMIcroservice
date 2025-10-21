@@ -1,1 +1,9 @@
-echo "ssl.endpoint.identification.algorithm=" >> ~/secrets/kafka/client.properties
+# remove the misspelled/duplicate line(s)
+sed -i '' '/^ssl\.endpoint\.identification\.algorith.*/d' ~/secrets/kafka/client.properties
+
+# ensure exactly one correct empty setting exists
+grep -q '^ssl.endpoint.identification.algorithm=' ~/secrets/kafka/client.properties || \
+  echo 'ssl.endpoint.identification.algorithm=' >> ~/secrets/kafka/client.properties
+
+# show the final file to verify
+cat ~/secrets/kafka/client.properties
