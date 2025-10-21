@@ -1,15 +1,13 @@
-mkdir -p ~/secrets/kafka
+cat > ~/secrets/kafka/client.properties <<'EOF'
+security.protocol=SSL
+ssl.truststore.location=/Users/beeravalli_reddy@optum.com/secrets/kafka/truststore.jks
+ssl.truststore.password=prmcert
+ssl.truststore.type=JKS
 
-# truststore.jks
-kubectl -n evisor-non-prod get secret kafka-gcp-eligibility-non-prod -o json \
-| jq -r '.data["truststore.jks"]' | base64 --decode > ~/secrets/kafka/truststore.jks
+ssl.keystore.location=/Users/beeravalli_reddy@optum.com/secrets/kafka/keystore.jks
+ssl.keystore.password=prmcert
+ssl.key.password=prmcert
+ssl.keystore.type=JKS
 
-# keystore.jks
-kubectl -n evisor-non-prod get secret kafka-gcp-eligibility-non-prod -o json \
-| jq -r '.data["keystore.jks"]' | base64 --decode > ~/secrets/kafka/keystore.jks
-
-# (optional) properties from the secret, if present
-kubectl -n evisor-non-prod get secret kafka-gcp-eligibility-non-prod -o json \
-| jq -r '.data["kafka-security.properties"]' | base64 --decode > ~/secrets/kafka/kafka-security.properties 2>/dev/null || true
-
-ls -l ~/secrets/kafka
+ssl.endpoint.identification.algorithm=
+EOF
