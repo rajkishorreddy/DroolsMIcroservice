@@ -1,1 +1,15 @@
-keytool -list -v -keystore ~/secrets/kafka/keystore.p12 -storetype PKCS12 -storepass prmcert | egrep "Alias name:|Owner:|Issuer:"
+mkdir -p ~/secrets/kafka
+
+# truststore.jks
+kubectl -n evisor-non-prod get secret kafka-gcp-eligibility-non-prod -o json \
+| jq -r '.data["truststore.jks"]' | base64 --decode > ~/secrets/kafka/truststore.jks
+
+# keystore.jks
+kubectl -n evisor-non-prod get secret kafka-gcp-eligibility-non-prod -o json \
+| jq -r '.data["keystore.jks"]' | base64 --decode > ~/secrets/kafka/keystore.jks
+
+# (optional) properties from the secret, if present
+kubectl -n evisor-non-prod get secret kafka-gcp-eligibility-non-prod -o json \
+| jq -r '.data["kafka-security.properties"]' | base64 --decode > ~/secrets/kafka/kafka-security.properties 2>/dev/null || true
+
+ls -l ~/secrets/kafka
