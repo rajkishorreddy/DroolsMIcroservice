@@ -1,13 +1,4 @@
-cat > ~/secrets/kafka/client.properties <<'EOF'
-security.protocol=SSL
-ssl.truststore.location=/Users/beeravalli_reddy@optum.com/secrets/kafka/truststore.jks
-ssl.truststore.password=prmcert
-ssl.truststore.type=JKS
-
-ssl.keystore.location=/Users/beeravalli_reddy@optum.com/secrets/kafka/keystore.jks
-ssl.keystore.password=prmcert
-ssl.key.password=prmcert
-ssl.keystore.type=JKS
-
-ssl.endpoint.identification.algorithm=
-EOF
+KAFKA_HEAP_OPTS="-Xmx1G" kafka-topics \
+  --bootstrap-server eligibility-cdb-non-prod-kafka-1-client.svc.prod-us.gcp.extscloud.com:16621,eligibility-cdb-non-prod-kafka-2-client.svc.prod-us.gcp.extscloud.com:16621 \
+  --list \
+  --command-config ~/secrets/kafka/client.properties | head -n 30
