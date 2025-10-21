@@ -1,6 +1,6 @@
-cp ~/secrets/kafka/client.properties ~/secrets/kafka/client.properties.bak
-
-sed -i '' 's#^ssl.keystore.location=.*#ssl.keystore.location=/Users/beeravalli_reddy@optum.com/secrets/kafka/keystore.p12#' ~/secrets/kafka/client.properties
-sed -i '' 's#^ssl.keystore.type=.*#ssl.keystore.type=PKCS12#' ~/secrets/kafka/client.properties
-
-cat ~/secrets/kafka/client.properties
+export KAFKA_HEAP_OPTS="-Xmx1G" && \
+kafka-topics \
+  --bootstrap-server eligibility-cdb-non-prod-kafka-1-client.svc.prod-us.gcp.extscloud.com:16621,eligibility-cdb-non-prod-kafka-2-client.svc.prod-us.gcp.extscloud.com:16621 \
+  --describe \
+  --topic evisor.cdb.systest.alpha.v14 \
+  --command-config ~/secrets/kafka/client.properties
