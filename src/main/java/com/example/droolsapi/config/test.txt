@@ -1,2 +1,81 @@
-kafka-topics --list --bootstrap-server <broker1,broker2> \
-  --command-config ~/secrets/kafka/client.properties | grep eligibility | sort
+package demo
+global java.util.Map result;
+
+rule "flag-high-amount"
+when
+  $m : java.util.Map( this["amount"] != null, ((Double)this["amount"]) > 1000 )
+then
+  // write what you want to see back from the rule
+  result.put("ruleNum","R001");
+  result.put("ruleFlag","Y");
+  result.put("isActive", Boolean.TRUE);
+end
+
+
+
+
+databricks fs mkdirs dbfs:/FileStore/rules
+databricks fs cp ./sample.drl dbfs:/FileStore/rules/sample.drl
+databricks fs ls dbfs:/FileStore/rules
+
+
+%scala
+import org.apache.spark.sql.functions._
+import org.kie.api.KieServices
+import org.kie.api.builder.{KieBuilder, Message, Results}
+import org.kie.api.runtime.StatelessKieSession
+import org.kie.internal.io.ResourceFactory
+
+// ---- 1) load the single DRL from DBFS ----
+val path = "/dbfs/FileStore/rules/sample.drl"
+val drlBody = scala.io.Source.fromFile(new java.io.File(path), "UTF-8").mkString
+
+def buildSession(drl: String): StatelessKieSession = {
+  val ks  = KieServices.Factory.get
+  val kfs = ks.newKieFileSystem()
+  kfs.write(ResourceFactory.newByteArrayResource(drl.getBytes("UTF-8")).setSourcePath("rules/sample.drl"))
+  val kb: KieBuilder = ks.newKieBuilder(kfs).buildAll()
+  val res: Results = kb.getResults
+  if (res.hasMessages(Message.Level.ERROR)) throw new IllegalStateException("Rule build errors: " + res.getMessages(Message.Level.ERROR))
+  ks.newKieContainer(ks.getRepository.getDefaultReleaseId).getKieBase.newStatelessKieSession()
+}
+
+// ---- 2) tiny demo input ----
+case class InputRow(indvId: Long, amount: Double)
+case class OutputRow(indvId: Long, ruleNum: String, ruleFlag: String, isActive: Boolean)
+
+import spark.implicits._
+val df = Seq(
+  InputRow(101, 500.0),     // should NOT fire
+  InputRow(102, 1200.5),    // should fire
+  InputRow(103, 50.0)       // should NOT fire
+).toDF
+
+// ---- 3) run per partition; compile once per executor ----
+val drlBC = spark.sparkContext.broadcast(drlBody)
+
+val out = df.mapPartitions { it =>
+  object RuleHolder {
+    lazy val session: StatelessKieSession = buildSession(drlBC.value)
+  }
+  it.map { r =>
+    val fact = new java.util.HashMap[String,Object]()
+    fact.put("indvId", r.getAs[Long]("indvId").asInstanceOf[java.lang.Long])
+    fact.put("amount", r.getAs[Double]("amount").asInstanceOf[java.lang.Double])
+
+    val result = new java.util.HashMap[String,Object]()
+    RuleHolder.session.setGlobal("result", result)
+
+    val facts = new java.util.ArrayList[Object]()
+    facts.add(fact); facts.add(result)
+    RuleHolder.session.execute(facts)
+
+    val ruleNum  = Option(result.get("ruleNum")).map(_.toString).getOrElse("NA")
+    val ruleFlag = Option(result.get("ruleFlag")).map(_.toString).getOrElse("N")
+    val isActive = Option(result.get("isActive")).exists(_.toString.equalsIgnoreCase("true"))
+
+    OutputRow(r.getAs[Long]("indvId"), ruleNum, ruleFlag, isActive)
+  }
+}.toDF
+
+out.show(false)
