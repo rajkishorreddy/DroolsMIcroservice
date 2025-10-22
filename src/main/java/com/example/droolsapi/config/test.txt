@@ -4,58 +4,23 @@ import org.kie.api.builder.{KieBuilder, Message, Results}
 import org.kie.api.runtime.StatelessKieSession
 import org.kie.internal.io.ResourceFactory
 
-val path = "/dbfs/FileStore/rules/test.drl"
-val drlBody = scala.io.Source.fromFile(new java.io.File(path), "UTF-8").mkString
-
-def buildSessionVerbose(drl: String): StatelessKieSession = {
-  val ks  = KieServices.Factory.get
-  val kfs = ks.newKieFileSystem()
-  kfs.write(ResourceFactory.newByteArrayResource(drl.getBytes("UTF-8"))
-    .setSourcePath("rules/test.drl"))
-
-  val kb: KieBuilder = ks.newKieBuilder(kfs).buildAll()
-  val res: Results = kb.getResults
-  if (res.hasMessages(Message.Level.ERROR)) {
-    println("==== DROOLS BUILD ERRORS (driver) ====")
-    res.getMessages(Message.Level.ERROR).forEach(m => println("  " + m))
-    throw new IllegalStateException("DRL failed to compile on driver")
-  }
-  ks.newKieContainer(ks.getRepository.getDefaultReleaseId)
-    .getKieBase.newStatelessKieSession()
-}
-
-// Try building on the driver now:
-val _driverSession = buildSessionVerbose(drlBody)
-println("Driver DRL compile: OK")
-
-
-
-%scala
-import org.apache.spark.sql.functions._
-import org.kie.api.KieServices
-import org.kie.api.builder.{KieBuilder, Message, Results}
-import org.kie.api.runtime.StatelessKieSession
-import org.kie.internal.io.ResourceFactory
-
 case class InputRow(indvId: Long, amount: Double)
 case class OutputRow(indvId: Long, ruleNum: String, ruleFlag: String, isActive: Boolean)
 
-import spark.implicits._
-val df = Seq(InputRow(101, 500.0), InputRow(102, 1200.5), InputRow(103, 50.0)).toDF
-
+// reuse the drlBody you already loaded above
 val drlBC = spark.sparkContext.broadcast(drlBody)
 
+// build Drools session on executors (with verbose errors)
 def buildSessionVerboseOnExec(drl: String): StatelessKieSession = {
   val ks  = KieServices.Factory.get
   val kfs = ks.newKieFileSystem()
   kfs.write(ResourceFactory.newByteArrayResource(drl.getBytes("UTF-8"))
-    .setSourcePath("rules/test.drl"))
+    .setSourcePath("rules/sample.drl"))
   val kb: KieBuilder = ks.newKieBuilder(kfs).buildAll()
   val res: Results = kb.getResults
   if (res.hasMessages(Message.Level.ERROR)) {
-    val msgs = res.getMessages(Message.Level.ERROR)
+    val it = res.getMessages(Message.Level.ERROR).iterator()
     val sb = new StringBuilder("DROOLS BUILD ERRORS (executor):\n")
-    val it = msgs.iterator()
     while (it.hasNext) sb.append("  ").append(it.next().toString).append("\n")
     throw new IllegalStateException(sb.toString)
   }
@@ -63,27 +28,32 @@ def buildSessionVerboseOnExec(drl: String): StatelessKieSession = {
     .getKieBase.newStatelessKieSession()
 }
 
+// tiny demo input (one should fire)
+import spark.implicits._
+val df = Seq(
+  InputRow(101, 500.0),     // should NOT fire
+  InputRow(102, 1200.5),    // should fire
+  InputRow(103, 50.0)       // should NOT fire
+).toDF
+
+// run per-partition (compile once per executor)
 val out = df.mapPartitions { it =>
-  // compile once per executor with verbose errors
   lazy val session: StatelessKieSession = buildSessionVerboseOnExec(drlBC.value)
 
   it.map { r =>
-    val fact   = new java.util.HashMap[String, Object]()
+    val fact   = new java.util.HashMap[String,Object]()
     fact.put("indvId", r.getAs[Long]("indvId").asInstanceOf[java.lang.Long])
     fact.put("amount", r.getAs[Double]("amount").asInstanceOf[java.lang.Double])
 
-    val result = new java.util.HashMap[String, Object]()
+    val result = new java.util.HashMap[String,Object]()
     session.setGlobal("result", result)
 
     val facts = new java.util.ArrayList[Object]()
     facts.add(fact); facts.add(result)
 
-    try {
-      session.execute(facts)
-    } catch {
-      case e: Throwable =>
-        // surface execution errors with inputs
-        throw new RuntimeException(s"Rule execution failed for fact=$fact\n${e.toString}", e)
+    try session.execute(facts)
+    catch { case e: Throwable =>
+      throw new RuntimeException(s"Rule execution failed for fact=$fact", e)
     }
 
     val ruleNum  = Option(result.get("ruleNum")).map(_.toString).getOrElse("NA")
@@ -94,6 +64,4 @@ val out = df.mapPartitions { it =>
   }
 }.toDF
 
-// Trigger with a small action so we see the real error if any:
-out.collect().foreach(println)
-// or: out.show(false)
+out.show(false)
