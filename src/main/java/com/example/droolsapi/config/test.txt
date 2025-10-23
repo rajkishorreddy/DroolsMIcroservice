@@ -2,8 +2,6 @@
 import org.kie.api.KieServices
 import org.kie.api.builder.{KieBuilder, Message}
 import org.kie.internal.io.ResourceFactory
-import org.kie.api.runtime.KieSession
-import org.kie.api.runtime.rule.ClassObjectFilter
 
 val drlPath = "/dbfs/FileStore/rules/AdolescentImmuneRule.drl"
 val drlBody = scala.io.Source.fromFile(new java.io.File(drlPath), "UTF-8").mkString
@@ -36,65 +34,63 @@ println("KieBase OK")
 %scala
 import scala.collection.JavaConverters._
 import CommonDataObject.{CommonDataModel, CommonDataResultSet}
-import org.kie.api.runtime.rule.ClassObjectFilter
+import org.kie.api.runtime.ClassObjectFilter
 
 case class Out(indvId: Long, ruleNum: String, ruleFlag: Boolean, isActive: String)
 
-def runRuleAndCollect(cdm: CommonDataModel): Seq[Out] = {
-  val ksession: KieSession = kieBase.newKieSession()
+def runRuleAndCollectMany(facts: Seq[CommonDataModel]): Seq[Out] = {
+  val ksession = kieBase.newKieSession()
   try {
-    ksession.insert(cdm)
+    facts.foreach(ksession.insert)
     ksession.fireAllRules()
 
-    // collect all CommonDataResultSet inserted by the DRL
-    val outObjs = ksession.getObjects(new ClassObjectFilter(classOf[CommonDataResultSet]))
+    val outObjs = ksession
+      .getObjects(new ClassObjectFilter(classOf[CommonDataResultSet]))
       .asScala.toSeq.map(_.asInstanceOf[CommonDataResultSet])
 
-    // adapt to your output table schema (IS_ACTIVE is 'Y'/'N' in Snowflake)
     outObjs.map { o =>
       Out(
-        indvId    = Option(o.getIndv_id).map(_.toLong).getOrElse(0L),
-        ruleNum   = Option(o.getStatus).getOrElse("NA"),         // or o.getRuleNum if you have that
-        ruleFlag  = true,                                        // your DRL implies a positive flag
-        isActive  = "Y"
+        indvId   = Option(o.getIndv_id).map(_.toLong).getOrElse(0L),  // adjust if your getter is different
+        ruleNum  = Option(o.getStatus).getOrElse("NA"),
+        ruleFlag = true,
+        isActive = "Y"
       )
     }
-  } finally {
-    ksession.dispose()
-  }
+  } finally ksession.dispose()
 }
-
-
-
 
 
 %scala
 import java.sql.Date
-import java.time.LocalDate
+def d(s: String) = Date.valueOf(s)  // "YYYY-MM-DD"
 
-// helper to make a java.sql.Date easily
-def d(s: String): Date = Date.valueOf(s)  // "YYYY-MM-DD"
+// all facts share the SAME member id
+val indv: java.lang.Integer = 9999
 
-// Create two CDM rows. Fill ONLY the fields your DRL actually reads.
-// Everything else can stay null/default.
-val fire = new CommonDataModel()  // assuming you added a public no-arg ctor
-fire.setIndv_id(1001: java.lang.Integer)
-fire.setElem_nbr(3327: java.lang.Integer)                 // matches your DRL "exists elem_nbr == 3327"
-fire.setMem_name("INDV_ELEMENTS_ATTR_EG")                 // matches mem_name
-fire.setContinuity("365D_Continuous")                     // used by your rule
-fire.setEffective_date(d("2024-01-01"))
-fire.setEnd_date(d("2024-12-31"))
-fire.setDob(d("2010-06-15"))                              // if age logic is used
-// set any other fields your DRL checks (e.g. others in `not`, dates, etc.)
+// Fact A: designed to make ageInDecimals == true
+val a = new CommonDataModel()
+a.setIndv_id(indv)
+a.setDob(d("2010-06-15")) // tweak if your getAgeInDecimals() expects another range
 
-val nofire = new CommonDataModel()
-nofire.setIndv_id(1002: java.lang.Integer)
-nofire.setElem_nbr(9999: java.lang.Integer)
-nofire.setMem_name("SOMETHING_ELSE")
-nofire.setContinuity("NON_CONTINUOUS")
+// Fact B: designed to pass the continuity/period condition
+val b = new CommonDataModel()
+b.setIndv_id(indv)
+b.setContinuity("365D_Continuous")
+b.setEffective_date(d("2023-01-01"))
+b.setEnd_date(d("2024-12-31"))   // should yield continuousPeriod >= 320 via your model function
 
-val outs1 = runRuleAndCollect(fire)
-val outs2 = runRuleAndCollect(nofire)
+// Fact C: the required evidence line
+val c = new CommonDataModel()
+c.setIndv_id(indv)
+c.setElem_nbr(3327: java.lang.Integer)
+c.setMem_name("INDV_ELEMENTS_ATTR_EG")
+c.setContinuity("365D_Continuous")
 
-println("FIRE → " + outs1)
-println("NOFIRE → " + outs2)
+// (Intentionally DO NOT add any facts with elem_nbr 1678/1679 + ADJ/PREADJ)
+
+// Optional: sanity prints if these getters exist in your model
+try println(s"ageInDecimals(A)=${a.getAgeInDecimals()}") catch { case _:Throwable => () }
+try println(s"continuousPeriod(B)=${b.getContinuousPeriod()}") catch { case _:Throwable => () }
+
+val outs = runRuleAndCollectMany(Seq(a, b, c))
+println("OUTS -> " + outs.mkString(", "))
