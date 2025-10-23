@@ -1,15 +1,19 @@
 %scala
+// ===== STEP 1: IMPORTS =====
 import org.kie.api.KieServices
 import org.kie.api.builder.{KieBuilder, Message, Results}
-import org.kie.api.runtime.StatelessKieSession
 import org.kie.internal.io.ResourceFactory
+import org.kie.api.runtime.StatelessKieSession
 import java.nio.charset.StandardCharsets
+import java.sql.Date
+import scala.collection.JavaConverters._
+import CommonDataObject.{CommonDataModel, CommonDataResultSet}
 
+// ===== STEP 2: HELPER TO LOAD ALL .DRL FILES FROM DBFS =====
 def buildSessionFromFolderVerbose(dirDbfs: String): StatelessKieSession = {
   val ks  = KieServices.Factory.get
   val kfs = ks.newKieFileSystem()
 
-  // translate dbfs:/ to /dbfs/ so Java File can read it
   val dirLocal = dirDbfs.replace("dbfs:/", "/dbfs/")
   val drlFiles = new java.io.File(dirLocal).listFiles
     .filter(f => f.isFile && f.getName.endsWith(".drl"))
@@ -17,6 +21,8 @@ def buildSessionFromFolderVerbose(dirDbfs: String): StatelessKieSession = {
   if (drlFiles.isEmpty) {
     throw new IllegalArgumentException(s"No .drl files found in $dirDbfs")
   }
+
+  println(s"🧩 Found DRLs: ${drlFiles.map(_.getName).mkString(", ")}")
 
   drlFiles.foreach { f =>
     val body = scala.io.Source.fromFile(f, "UTF-8").mkString
@@ -30,37 +36,31 @@ def buildSessionFromFolderVerbose(dirDbfs: String): StatelessKieSession = {
   val kb: KieBuilder = ks.newKieBuilder(kfs).buildAll()
   val res: Results   = kb.getResults
   if (res.hasMessages(Message.Level.ERROR)) {
-    println("—— DROOLS BUILD ERRORS ——")
+    println("❌ DROOLS BUILD ERRORS:")
     res.getMessages(Message.Level.ERROR).forEach(m => println("  " + m))
     throw new IllegalStateException("DRL compile failed")
   }
+
   ks.newKieContainer(ks.getRepository.getDefaultReleaseId)
     .getKieBase
     .newStatelessKieSession()
 }
 
-val sess = buildSessionFromFolderVerbose("dbfs:/FileStore/rules")
-println("Loaded DRLs -> OK")
-
-
-
-
-
-
-
-%scala
-import java.sql.Date
-import CommonDataObject.{CommonDataModel, CommonDataResultSet}
-import scala.collection.JavaConverters._
-
 def d(s: String): java.sql.Date = Date.valueOf(s)
 
+
+// ===== STEP 3: BUILD SESSION =====
+val sess = buildSessionFromFolderVerbose("dbfs:/FileStore/rules")
+println("✅ Drools Session Loaded\n")
+
+
+// ===== STEP 4: CREATE DUMMY FACTS =====
 val indv = 12345: java.lang.Integer
 
-// ---------- AdolescentImmuneRule Facts ----------
+// --- AdolescentImmuneRule Facts ---
 val a = new CommonDataModel()
 a.setIndv_id(indv)
-a.setDob(d("2013-08-15")) // so ageInDecimals=true
+a.setDob(d("2013-08-15")) // ageInDecimals = true
 
 val b = new CommonDataModel()
 b.setIndv_id(indv)
@@ -77,7 +77,7 @@ c.setElem_nbr(3327: java.lang.Integer)
 c.setMem_name("INDV_ELEMENTS_ATTR_EG")
 c.setContinuity("365D_Continuous")
 
-// ---------- AsthmaRule Facts ----------
+// --- AsthmaRule Facts ---
 val p = new CommonDataModel()
 p.setIndv_id(indv)
 p.setAge(25: java.lang.Integer)
@@ -94,8 +94,28 @@ r.setIndv_id(indv)
 r.setElem_nbr(1021: java.lang.Integer)
 r.setMem_name("INDV_ELEMENTS_ADJ")
 
-// (do not create the 3019 blocking fact)
+// (we do NOT create elem_nbr=3019 since it blocks the rule)
 
-// ---------- Execute ----------
-val outs = runRuleAndCollectMany(Seq(a,b,c,p,q,r))
-println("OUTS -> " + outs.mkString(", "))
+
+// ===== STEP 5: RUN RULES =====
+case class Out(indvId: Long, ruleNum: String, ruleFlag: Boolean, isActive: String)
+
+def runRuleAndCollectMany(facts: Seq[CommonDataModel]): Seq[Out] = {
+  val factsList = new java.util.ArrayList[Object]()
+  facts.foreach(factsList.add)
+
+  val inserted = new java.util.ArrayList[Object]()
+  sess.execute(factsList)
+  sess.execute(factsList, new org.kie.api.runtime.ClassObjectFilter(classOf[CommonDataResultSet]), inserted)
+
+  inserted.asScala.collect {
+    case r: CommonDataResultSet =>
+      Out(indv.longValue, Option(r.getStatus).getOrElse("NA"), true, "Y")
+  }.toSeq
+}
+
+val outs = runRuleAndCollectMany(Seq(a, b, c, p, q, r))
+println("\n🚀 RULE EXECUTION RESULTS 🚀")
+outs.foreach(o => println(s"→ INDV: ${o.indvId}, STATUS: ${o.ruleNum}, ACTIVE: ${o.isActive}"))
+
+println(s"\n✅ TOTAL RULES FIRED: ${outs.size}")
