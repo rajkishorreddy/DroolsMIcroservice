@@ -1,37 +1,5 @@
 %scala
-import org.kie.api.KieServices
-import org.kie.api.builder.{KieBuilder, Message}
-import org.kie.internal.io.ResourceFactory
-
-val drlPath = "/dbfs/FileStore/rules/AdolescentImmuneRule.drl"
-val drlBody = scala.io.Source.fromFile(new java.io.File(drlPath), "UTF-8").mkString
-
-def buildKieBaseVerbose(drl: String) = {
-  val ks  = KieServices.Factory.get
-  val kfs = ks.newKieFileSystem()
-  kfs.write(
-    ResourceFactory
-      .newByteArrayResource(drl.getBytes("UTF-8"))
-      .setSourcePath("rules/AdolescentImmuneRule.drl")
-  )
-  val kb: KieBuilder = ks.newKieBuilder(kfs).buildAll()
-  val res = kb.getResults
-  if (res.hasMessages(Message.Level.ERROR)) {
-    println("===== DROOLS BUILD ERRORS =====")
-    res.getMessages(Message.Level.ERROR).forEach(m => println("  " + m))
-    throw new IllegalStateException("DRL failed to compile")
-  } else {
-    println("DRL compile: OK")
-  }
-  ks.newKieContainer(ks.getRepository.getDefaultReleaseId).getKieBase
-}
-
-val kieBase = buildKieBaseVerbose(drlBody)
-println("KieBase OK")
-
-
-
-%scala
+import java.sql.Date
 import scala.collection.JavaConverters._
 import CommonDataObject.{CommonDataModel, CommonDataResultSet}
 import org.kie.api.runtime.ClassObjectFilter
@@ -42,15 +10,15 @@ def runRuleAndCollectMany(facts: Seq[CommonDataModel]): Seq[Out] = {
   val ksession = kieBase.newKieSession()
   try {
     facts.foreach(ksession.insert)
-    ksession.fireAllRules()
-
+    val fired = ksession.fireAllRules()
+    println(s"Fired $fired rules")
     val outObjs = ksession
       .getObjects(new ClassObjectFilter(classOf[CommonDataResultSet]))
       .asScala.toSeq.map(_.asInstanceOf[CommonDataResultSet])
 
     outObjs.map { o =>
       Out(
-        indvId   = Option(o.getIndv_id).map(_.toLong).getOrElse(0L),  // adjust if your getter is different
+        indvId   = Option(o.getIndv_id).map(_.toLong).getOrElse(0L),
         ruleNum  = Option(o.getStatus).getOrElse("NA"),
         ruleFlag = true,
         isActive = "Y"
@@ -59,38 +27,33 @@ def runRuleAndCollectMany(facts: Seq[CommonDataModel]): Seq[Out] = {
   } finally ksession.dispose()
 }
 
+def d(s: String) = Date.valueOf(s)
 
-%scala
-import java.sql.Date
-def d(s: String) = Date.valueOf(s)  // "YYYY-MM-DD"
+val indv = 12345: java.lang.Integer
 
-// all facts share the SAME member id
-val indv: java.lang.Integer = 9999
-
-// Fact A: designed to make ageInDecimals == true
+// --- Fact A: adolescent (ageInDecimals == true)
 val a = new CommonDataModel()
 a.setIndv_id(indv)
-a.setDob(d("2010-06-15")) // tweak if your getAgeInDecimals() expects another range
+a.setDob(d("2012-06-15"))
 
-// Fact B: designed to pass the continuity/period condition
+// --- Fact B: long continuous period (adjustedFinalDate >= 320)
 val b = new CommonDataModel()
 b.setIndv_id(indv)
 b.setContinuity("365D_Continuous")
-b.setEffective_date(d("2023-01-01"))
-b.setEnd_date(d("2024-12-31"))   // should yield continuousPeriod >= 320 via your model function
+b.setEffective_date(d("2024-01-01"))
+b.setMax_end_date(d("2023-12-31"))
+b.setMin_eff_date(d("2023-01-01"))
+b.setFinal_end_date(d("2024-12-31"))
+b.setGrace_period(400: java.lang.Integer)
 
-// Fact C: the required evidence line
+// --- Fact C: qualifying evidence
 val c = new CommonDataModel()
 c.setIndv_id(indv)
 c.setElem_nbr(3327: java.lang.Integer)
 c.setMem_name("INDV_ELEMENTS_ATTR_EG")
 c.setContinuity("365D_Continuous")
 
-// (Intentionally DO NOT add any facts with elem_nbr 1678/1679 + ADJ/PREADJ)
-
-// Optional: sanity prints if these getters exist in your model
-try println(s"ageInDecimals(A)=${a.getAgeInDecimals()}") catch { case _:Throwable => () }
-try println(s"continuousPeriod(B)=${b.getContinuousPeriod()}") catch { case _:Throwable => () }
+// 🚫 Do NOT add 1678 or 1679 lines
 
 val outs = runRuleAndCollectMany(Seq(a, b, c))
 println("OUTS -> " + outs.mkString(", "))
