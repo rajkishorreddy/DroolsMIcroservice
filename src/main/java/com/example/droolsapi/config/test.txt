@@ -1,2 +1,24 @@
 com.snowflake:spark-snowflake_2.12:2.13.1-spark_3.5
 net.snowflake:snowflake-jdbc:3.15.1
+
+
+val sfOptions = Map(
+  "sfURL" -> "<account>.snowflakecomputing.com",
+  "sfUser" -> "<USER_EMAIL>",
+  "sfRole" -> "AZU_SDRP_LUTF_STG_DEVELOPER_ROLE",
+  "sfWarehouse" -> "LUTF_STG_EVISOR_WH",
+  "sfDatabase" -> "LUTF_STG_EVISOR_DB",
+  "sfSchema" -> "ETL",
+  // choose ONE auth method:
+  //"sfPassword" -> dbutils.secrets.get("snowflake","sf_password"),
+  "authenticator" -> "SNOWFLAKE_JWT",
+  "pem_private_key" -> dbutils.secrets.get("snowflake","sf_private_key")
+)
+
+val df = spark.read
+  .format("snowflake")
+  .options(sfOptions)
+  .option("query", "SELECT * FROM ELEMENT_DATA_TABLE_KIS LIMIT 1")
+  .load()
+
+df.show(false)
