@@ -1,81 +1,61 @@
-openssl pkcs8 -in rsa_key.p8 -topk8 -nocrypt -out rsa_key_nopass.pem
-
-openssl pkcs8 -in rsa_key_nopass.pem -topk8 -nocrypt -outform DER -out rsa_key.der
-base64 -w0 rsa_key.der > rsa_key.der.b64
-
-
-databricks fs cp rsa_key.der.b64 dbfs:/FileStore/keys/rsa_key.der.b64
-
-
-
-with open("/dbfs/FileStore/keys/rsa_key.der.b64") as f:
-    key_b64 = f.read().strip()
-
-sfOptions = {
-    "sfURL": "uhgdwaas.east-us-2.azure.snowflakecomputing.com",
-    "sfUser": "BEERAVALLI_REDDY@OPTUM.COM",
-    "sfRole": "AZU_SDRP_LUTF_STG_DEVELOPER_ROLE",
-    "sfWarehouse": "LUTF_STG_EVISOR_WH",
-    "sfDatabase": "LUTF_STG_EVISOR_DB",
-    "sfSchema": "ETL",
-    "sfAuthenticator": "SNOWFLAKE_JWT",
-    "pem_private_key": key_b64,
-}
-
-df = (spark.read
-      .format("snowflake")
-      .options(**sfOptions)
-      .option("query", "select current_user(), current_role(), current_database(), current_schema()")
-      .load())
-df.show()
-
-
-
-
-
 from base64 import b64encode
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 
-key_path = "/dbfs/FileStore/keys/rsa_key.p8"
-passphrase = "987654321"   # replace with your actual passphrase
+key_path = "/dbfs/FileStore/keys/rsa_key.p8"     # your PEM path
+passphrase = "YOUR_PASSPHRASE"
 
-def get_private_key():
-    # Load the encrypted PEM and decode to unencrypted PKCS#8 DER bytes
-    with open(key_path, "rb") as key_file:
-        p_key = serialization.load_pem_private_key(
-            key_file.read(),
-            password=passphrase.encode(),
-            backend=default_backend()
-        )
-
-    # Convert to unencrypted PKCS#8 DER (binary)
-    private_bytes = p_key.private_bytes(
-        encoding=serialization.Encoding.DER,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption()
+with open(key_path, "rb") as f:
+    p_key = serialization.load_pem_private_key(
+        f.read(),
+        password=passphrase.encode(),
+        backend=default_backend(),
     )
 
-    # Base64-encode it (this is what Snowflake connector expects)
-    return b64encode(private_bytes).decode("utf-8")
+# Convert to unencrypted PKCS#8 DER bytes, then base64
+private_bytes = p_key.private_bytes(
+    encoding=serialization.Encoding.DER,
+    format=serialization.PrivateFormat.PKCS8,
+    encryption_algorithm=serialization.NoEncryption(),
+)
 
-# ---- Snowflake connection options ----
-sfOptions = {
-    "sfURL": "uhgdwaas.east-us-2.azure.snowflakecomputing.com",
-    "sfUser": "BEERAVALLI_REDDY@OPTUM.COM",
-    "sfRole": "AZU_SDRP_LUTF_STG_DEVELOPER_ROLE",
-    "sfWarehouse": "LUTF_STG_EVISOR_WH",
-    "sfDatabase": "LUTF_STG_EVISOR_DB",
-    "sfSchema": "ETL",
-    "authenticator": "SNOWFLAKE_JWT",
-    "pem_private_key": get_private_key()
+b64 = b64encode(private_bytes).decode("utf-8")
+
+# Save the base64 to DBFS as a small text file
+with open("/dbfs/FileStore/keys/sf_pk_base64.txt", "w") as f:
+    f.write(b64)
+
+print("Saved to /dbfs/FileStore/keys/sf_pk_base64.txt")
+
+
+// ==== Scala: read Snowflake (JWT) ====
+
+import scala.collection.JavaConverters._
+
+// 1) Read the base64-encoded PKCS#8 private key we saved from Python
+val pemB64: String = {
+  // head() reads small text files; increase maxBytes if your key were large (it isn't)
+  dbutils.fs.head("dbfs:/FileStore/keys/sf_pk_base64.txt", 1024*1024)
 }
 
-# ---- Test query ----
-df = (spark.read
-      .format("snowflake")
-      .options(**sfOptions)
-      .option("query", "SELECT CURRENT_ROLE(), CURRENT_DATABASE(), CURRENT_SCHEMA()")
-      .load())
+// 2) Snowflake connection options via JWT
+val sfOptions = Map(
+  "sfURL"         -> "uhgdwaas.east-us-2.azure.snowflakecomputing.com",
+  "sfUser"        -> "BEERAVALLI_REDDY@OPTUM.COM",
+  "sfRole"        -> "AZU_SDRP_LUTF_STG_DEVELOPER_ROLE",
+  "sfWarehouse"   -> "LUTF_STG_EVISOR_WH",
+  "sfDatabase"    -> "LUTF_STG_EVISOR_DB",
+  "sfSchema"      -> "ETL",
+  "authenticator" -> "SNOWFLAKE_JWT",
+  "pem_private_key" -> pemB64
+)
 
-df.show()
+// 3) Test query: pull one row to validate the connection
+val df = spark.read
+  .format("snowflake")
+  .options(sfOptions)
+  .option("query", "SELECT * FROM ELEMENT_DATA_TABLE_KIS LIMIT 1")
+  .load()
+
+df.printSchema()
+df.show(false)
