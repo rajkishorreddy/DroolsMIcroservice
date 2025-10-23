@@ -1,24 +1,35 @@
-com.snowflake:spark-snowflake_2.12:2.13.1-spark_3.5
-net.snowflake:snowflake-jdbc:3.15.1
+from base64 import b64encode
+from cryptography.hazmat.primitives import serialization
 
+key_path = "/dbfs/FileStore/keys/rsa_key.p8"
+passphrase = dbutils.secrets.get("snowflake", "rsa_passphrase")
 
-val sfOptions = Map(
-  "sfURL" -> "<account>.snowflakecomputing.com",
-  "sfUser" -> "<USER_EMAIL>",
-  "sfRole" -> "AZU_SDRP_LUTF_STG_DEVELOPER_ROLE",
-  "sfWarehouse" -> "LUTF_STG_EVISOR_WH",
-  "sfDatabase" -> "LUTF_STG_EVISOR_DB",
-  "sfSchema" -> "ETL",
-  // choose ONE auth method:
-  //"sfPassword" -> dbutils.secrets.get("snowflake","sf_password"),
-  "authenticator" -> "SNOWFLAKE_JWT",
-  "pem_private_key" -> dbutils.secrets.get("snowflake","sf_private_key")
+with open(key_path, "rb") as f:
+    pkey = serialization.load_pem_private_key(
+        f.read(),
+        password=passphrase.encode() if passphrase else None,
+    )
+
+der_bytes = pkey.private_bytes(
+    encoding=serialization.Encoding.DER,
+    format=serialization.PrivateFormat.PKCS8,
+    encryption_algorithm=serialization.NoEncryption(),
 )
+der_b64 = b64encode(der_bytes).decode()
 
-val df = spark.read
-  .format("snowflake")
-  .options(sfOptions)
-  .option("query", "SELECT * FROM ELEMENT_DATA_TABLE_KIS LIMIT 1")
-  .load()
+sfOptions = {
+  "sfURL": "<account>.snowflakecomputing.com",
+  "sfUser": "<USER_EMAIL>",
+  "sfRole": "AZU_SDRP_LUTF_STG_DEVELOPER_ROLE",
+  "sfWarehouse": "LUTF_STG_EVISOR_WH",
+  "sfDatabase": "LUTF_STG_EVISOR_DB",
+  "sfSchema": "ETL",
+  "authenticator": "SNOWFLAKE_JWT",
+  "pem_private_key": der_b64
+}
 
-df.show(false)
+df = (spark.read.format("snowflake")
+      .options(**sfOptions)
+      .option("query", "SELECT 1")
+      .load())
+df.show()
