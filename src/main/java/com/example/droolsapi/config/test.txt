@@ -1,3 +1,38 @@
+openssl pkcs8 -in rsa_key.p8 -topk8 -nocrypt -out rsa_key_nopass.pem
+
+openssl pkcs8 -in rsa_key_nopass.pem -topk8 -nocrypt -outform DER -out rsa_key.der
+base64 -w0 rsa_key.der > rsa_key.der.b64
+
+
+databricks fs cp rsa_key.der.b64 dbfs:/FileStore/keys/rsa_key.der.b64
+
+
+
+with open("/dbfs/FileStore/keys/rsa_key.der.b64") as f:
+    key_b64 = f.read().strip()
+
+sfOptions = {
+    "sfURL": "uhgdwaas.east-us-2.azure.snowflakecomputing.com",
+    "sfUser": "BEERAVALLI_REDDY@OPTUM.COM",
+    "sfRole": "AZU_SDRP_LUTF_STG_DEVELOPER_ROLE",
+    "sfWarehouse": "LUTF_STG_EVISOR_WH",
+    "sfDatabase": "LUTF_STG_EVISOR_DB",
+    "sfSchema": "ETL",
+    "sfAuthenticator": "SNOWFLAKE_JWT",
+    "pem_private_key": key_b64,
+}
+
+df = (spark.read
+      .format("snowflake")
+      .options(**sfOptions)
+      .option("query", "select current_user(), current_role(), current_database(), current_schema()")
+      .load())
+df.show()
+
+
+
+
+
 from base64 import b64encode
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
