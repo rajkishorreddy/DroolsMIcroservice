@@ -1,42 +1,23 @@
 %scala
+val sess = buildSessionFromFolderVerbose("dbfs:/FileStore/rules")
+println("Loaded DRLs -> OK")
+
+
+
+%scala
 import java.sql.Date
-import scala.collection.JavaConverters._
 import CommonDataObject.{CommonDataModel, CommonDataResultSet}
-import org.kie.api.runtime.ClassObjectFilter
+import scala.collection.JavaConverters._
 
-case class Out(indvId: Long, ruleNum: String, ruleFlag: Boolean, isActive: String)
-
-def runRuleAndCollectMany(facts: Seq[CommonDataModel]): Seq[Out] = {
-  val ksession = kieBase.newKieSession()
-  try {
-    facts.foreach(ksession.insert)
-    val fired = ksession.fireAllRules()
-    println(s"Fired $fired rules")
-    val outObjs = ksession
-      .getObjects(new ClassObjectFilter(classOf[CommonDataResultSet]))
-      .asScala.toSeq.map(_.asInstanceOf[CommonDataResultSet])
-
-    outObjs.map { o =>
-      Out(
-        indvId   = Option(o.getIndv_id).map(_.toLong).getOrElse(0L),
-        ruleNum  = Option(o.getStatus).getOrElse("NA"),
-        ruleFlag = true,
-        isActive = "Y"
-      )
-    }
-  } finally ksession.dispose()
-}
-
-def d(s: String) = Date.valueOf(s)
+def d(s: String): java.sql.Date = Date.valueOf(s)
 
 val indv = 12345: java.lang.Integer
 
-// --- Fact A: adolescent (ageInDecimals == true)
+// ---------- AdolescentImmuneRule Facts ----------
 val a = new CommonDataModel()
 a.setIndv_id(indv)
-a.setDob(d("2012-06-15"))
+a.setDob(d("2013-08-15")) // so ageInDecimals=true
 
-// --- Fact B: long continuous period (adjustedFinalDate >= 320)
 val b = new CommonDataModel()
 b.setIndv_id(indv)
 b.setContinuity("365D_Continuous")
@@ -46,14 +27,31 @@ b.setMin_eff_date(d("2023-01-01"))
 b.setFinal_end_date(d("2024-12-31"))
 b.setGrace_period(400: java.lang.Integer)
 
-// --- Fact C: qualifying evidence
 val c = new CommonDataModel()
 c.setIndv_id(indv)
 c.setElem_nbr(3327: java.lang.Integer)
 c.setMem_name("INDV_ELEMENTS_ATTR_EG")
 c.setContinuity("365D_Continuous")
 
-// 🚫 Do NOT add 1678 or 1679 lines
+// ---------- AsthmaRule Facts ----------
+val p = new CommonDataModel()
+p.setIndv_id(indv)
+p.setAge(25: java.lang.Integer)
+p.setElem_nbr(3018: java.lang.Integer)
+p.setMem_name("INDV_ELEMENTS_ATTR_EG")
 
-val outs = runRuleAndCollectMany(Seq(a, b, c))
+val q = new CommonDataModel()
+q.setIndv_id(indv)
+q.setElem_nbr(1125: java.lang.Integer)
+q.setMem_name("INDV_ELEMENTS_EBM")
+
+val r = new CommonDataModel()
+r.setIndv_id(indv)
+r.setElem_nbr(1021: java.lang.Integer)
+r.setMem_name("INDV_ELEMENTS_ADJ")
+
+// (do not create the 3019 blocking fact)
+
+// ---------- Execute ----------
+val outs = runRuleAndCollectMany(Seq(a,b,c,p,q,r))
 println("OUTS -> " + outs.mkString(", "))
