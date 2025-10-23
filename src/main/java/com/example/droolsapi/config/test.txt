@@ -1,6 +1,50 @@
 %scala
+import org.kie.api.KieServices
+import org.kie.api.builder.{KieBuilder, Message, Results}
+import org.kie.api.runtime.StatelessKieSession
+import org.kie.internal.io.ResourceFactory
+import java.nio.charset.StandardCharsets
+
+def buildSessionFromFolderVerbose(dirDbfs: String): StatelessKieSession = {
+  val ks  = KieServices.Factory.get
+  val kfs = ks.newKieFileSystem()
+
+  // translate dbfs:/ to /dbfs/ so Java File can read it
+  val dirLocal = dirDbfs.replace("dbfs:/", "/dbfs/")
+  val drlFiles = new java.io.File(dirLocal).listFiles
+    .filter(f => f.isFile && f.getName.endsWith(".drl"))
+
+  if (drlFiles.isEmpty) {
+    throw new IllegalArgumentException(s"No .drl files found in $dirDbfs")
+  }
+
+  drlFiles.foreach { f =>
+    val body = scala.io.Source.fromFile(f, "UTF-8").mkString
+    kfs.write(
+      ResourceFactory
+        .newByteArrayResource(body.getBytes(StandardCharsets.UTF_8))
+        .setSourcePath(s"rules/${f.getName}")
+    )
+  }
+
+  val kb: KieBuilder = ks.newKieBuilder(kfs).buildAll()
+  val res: Results   = kb.getResults
+  if (res.hasMessages(Message.Level.ERROR)) {
+    println("—— DROOLS BUILD ERRORS ——")
+    res.getMessages(Message.Level.ERROR).forEach(m => println("  " + m))
+    throw new IllegalStateException("DRL compile failed")
+  }
+  ks.newKieContainer(ks.getRepository.getDefaultReleaseId)
+    .getKieBase
+    .newStatelessKieSession()
+}
+
 val sess = buildSessionFromFolderVerbose("dbfs:/FileStore/rules")
 println("Loaded DRLs -> OK")
+
+
+
+
 
 
 
