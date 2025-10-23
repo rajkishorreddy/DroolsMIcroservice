@@ -1,33 +1,149 @@
-// keep your imports (incl. ClassObjectFilter) above
+%scala
+import org.apache.spark.sql.{Row, DataFrame}
 
-case class Out(indvId: Long, ruleNum: String, ruleFlag: Boolean, isActive: String)
+// ===== 1) Snowflake options (reuse yours) =====
+val pemB64: String = dbutils.fs.head("dbfs:/FileStore/keys/sf_pk_base64.txt", 1024*1024)
 
-def fire(facts: Seq[CommonDataObject.CommonDataModel]): Seq[Out] = {
-  result.clear()
-  sess.execute(facts.asJava)
-  // capture CommonDataResultSet produced by the rules
-  sess.execute(new java.util.ArrayList[Object](), new org.kie.api.runtime.ClassObjectFilter(classOf[CommonDataObject.CommonDataResultSet]))
+val sfOptions = Map(
+  "sfURL"         -> "uhgdwaas.east-us-2.azure.snowflakecomputing.com",
+  "sfUser"        -> "BEERAVALLI_REDDY@OPTUM.COM",
+  "sfRole"        -> "AZU_SDRP_LUTF_STG_DEVELOPER_ROLE",
+  "sfWarehouse"   -> "LUTF_STG_EVISOR_WH",
+  "sfDatabase"    -> "LUTF_STG_EVISOR_DB",
+  "sfSchema"      -> "ETL",
+  "authenticator" -> "SNOWFLAKE_JWT",
+  "pem_private_key" -> pemB64
+)
 
-  Seq(
-    Out(
-      facts.headOption
-        .flatMap(m => Option(m.getIndv_id()).map(_.longValue()))  // Integer -> Long, null-safe
-        .getOrElse(-1L),
-      Option(result.get("ruleNum")).map(_.toString).getOrElse("NA"),
-      Option(result.get("ruleFlag")).exists(_.toString.equalsIgnoreCase("true")),
-      Option(result.get("isActive")).map(_.toString).getOrElse("Y")
-    )
-  )
+// ===== 2) Read a manageable slice while wiring types =====
+val df = spark.read
+  .format("snowflake")
+  .options(sfOptions)
+  .option("query",
+    """SELECT *
+       FROM ELEMENT_DATA_TABLE_KIS
+       LIMIT 1000""")
+  .load()
+
+println(s"Loaded rows: ${df.count()}")
+
+// ===== 3) Strongly-typed getters (NO Option.orNull; return exact Java types) =====
+def gi(r: Row, name: String): java.lang.Integer = {
+  val v = r.getAs[Any](name)
+  v match {
+    case null                      => null
+    case n: java.lang.Integer      => n
+    case n: java.lang.Long         => java.lang.Integer.valueOf(n.intValue)
+    case n: java.lang.Short        => java.lang.Integer.valueOf(n.toInt)
+    case n: java.lang.Byte         => java.lang.Integer.valueOf(n.toInt)
+    case n: java.math.BigDecimal   => java.lang.Integer.valueOf(n.intValue)
+    case s: String if s.trim.nonEmpty => java.lang.Integer.valueOf(s.trim.toInt)
+    case _                         => null
+  }
 }
 
-// ---- group by INDV_ID (null-safe) and fire once per INDV_ID ----
-val outs: Seq[Out] =
-  testFacts
-    .groupBy(m => Option(m.getIndv_id()).map(_.longValue()).getOrElse(-1L)) // key: Long
-    .values                                    // Iterable[Seq[CommonDataModel]]
-    .toSeq
-    .flatMap(fire)
+def gl(r: Row, name: String): java.lang.Long = {
+  val v = r.getAs[Any](name)
+  v match {
+    case null                      => null
+    case n: java.lang.Long         => n
+    case n: java.lang.Integer      => java.lang.Long.valueOf(n.longValue)
+    case n: java.math.BigDecimal   => java.lang.Long.valueOf(n.longValue)
+    case s: String if s.trim.nonEmpty => java.lang.Long.valueOf(s.trim.toLong)
+    case _                         => null
+  }
+}
 
-// sanity print
-println(s"🔥 Fired groups: ${outs.size}")
-outs.take(10).foreach(println)
+def gdbl(r: Row, name: String): java.lang.Double = {
+  val v = r.getAs[Any](name)
+  v match {
+    case null                      => null
+    case n: java.lang.Double       => n
+    case n: java.lang.Float        => java.lang.Double.valueOf(n.toDouble)
+    case n: java.math.BigDecimal   => java.lang.Double.valueOf(n.doubleValue)
+    case n: java.lang.Long         => java.lang.Double.valueOf(n.toDouble)
+    case n: java.lang.Integer      => java.lang.Double.valueOf(n.toDouble)
+    case s: String if s.trim.nonEmpty => java.lang.Double.valueOf(s.trim.toDouble)
+    case _                         => null
+  }
+}
+
+def gflt(r: Row, name: String): java.lang.Float = {
+  val v = r.getAs[Any](name)
+  v match {
+    case null                      => null
+    case n: java.lang.Float        => n
+    case n: java.lang.Double       => java.lang.Float.valueOf(n.toFloat)
+    case n: java.math.BigDecimal   => java.lang.Float.valueOf(n.floatValue)
+    case n: java.lang.Long         => java.lang.Float.valueOf(n.toFloat)
+    case n: java.lang.Integer      => java.lang.Float.valueOf(n.toFloat)
+    case s: String if s.trim.nonEmpty => java.lang.Float.valueOf(s.trim.toFloat)
+    case _                         => null
+  }
+}
+
+def gs(r: Row, name: String): String =
+  r.getAs[Any](name) match {
+    case null => null
+    case s: String => s
+    case other     => other.toString
+  }
+
+// Spark DateType is java.sql.Date; also allow LocalDate in case Snowflake connector returns it
+def gdate(r: Row, name: String): java.sql.Date = {
+  val v = r.getAs[Any](name)
+  v match {
+    case null                        => null
+    case d: java.sql.Date            => d
+    case d: java.time.LocalDate      => java.sql.Date.valueOf(d)
+    case s: String if s.trim.nonEmpty =>
+      // Accept ISO yyyy-MM-dd
+      try java.sql.Date.valueOf(s.trim) catch { case _: Throwable => null }
+    case _                           => null
+  }
+}
+
+// ===== 4) Map one Row -> CommonDataModel (full constructor you showed) =====
+def toModel(r: Row): CommonDataObject.CommonDataModel =
+  new CommonDataObject.CommonDataModel(
+    gi(r,"INDV_ID"),
+    gi(r,"ELEM_NBR"),
+    gdbl(r,"ELEM_QTY"),
+    gi(r,"AGE"),
+    gs(r,"MEM_NAME"),
+    gdate(r,"ELEM_DT_1"),
+    gdate(r,"ELEM_DT_2"),
+    gs(r,"SCOR_TYP_CD"),
+    gdbl(r,"SCOR_VAL"),
+    gdbl(r,"PRG_SRVC_ID"),
+    gdate(r,"TRM_DT"),
+    gdate(r,"EFF_DT"),
+    gdate(r,"ID_RUN_DT"),
+    gs(r,"ST_ABBR_CD"),
+    gs(r,"OPTUM_SEG_ID"),
+    gi(r,"OUTBOUND_FILE_ID"),
+    gs(r,"SCEN_RULE_CD"),
+    gdate(r,"DOB"),
+    gdate(r,"EFFECTIVE_DATE"),
+    gdate(r,"END_DATE"),
+    gs(r,"MED_DX_OF_INTEREST"),
+    gs(r,"SCENARIO_CD"),
+    gdate(r,"NEXT_EFFECTIVE_DATE"),
+    gi(r,"GRACE_PERIOD"),
+    gdate(r,"MIN_EFF_DATE"),
+    gdate(r,"MAX_END_DATE"),
+    gdate(r,"FINAL_END_DATE"),
+    gs(r,"ADT_CHIEF_COMPLAINT"),
+    gs(r,"ELEM_SUP"),
+    gs(r,"CONTINUITY"),
+    gflt(r,"MED_COV"),
+    gflt(r,"REL_IPTNT_RISK_12_MO_NBR")
+  )
+
+// ===== 5) Try mapping a few rows to verify everything compiles =====
+val models = df.limit(5).collect().toSeq.map(toModel)
+println(s"Built CommonDataModel objects: ${models.size}")
+// quick sanity prints
+models.zipWithIndex.foreach { case (m,i) =>
+  println(s"[$i] indv=${m.getIndv_id()}, elem=${m.getElem_nbr()}, mem=${m.getMem_name()}, ageInDecimals=${m.getAgeInDecimals()}")
+}
