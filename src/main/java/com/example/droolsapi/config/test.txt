@@ -2,186 +2,163 @@
 import org.apache.spark.sql.{Row, DataFrame}
 import org.apache.spark.sql.functions._
 import scala.collection.JavaConverters._
-import java.util.{ArrayList => JArrayList, HashMap => JMap}
-import org.kie.api.KieServices
-import org.kie.api.builder.{KieBuilder, Message, Results}
-import org.kie.api.runtime.{StatelessKieSession, KieContainer}
-import org.kie.internal.io.ResourceFactory
-import java.nio.charset.StandardCharsets
+import scala.util.Try
 
-// ==============================
-// 0) Snowflake connection (JWT)
-// ==============================
-val pemB64 = dbutils.fs.head("dbfs:/FileStore/keys/sf_pk_base64.txt", 1024*1024)
+// ===== 1) Snowflake read (reuse your working sfOptions) =====
 val sfOptions = Map(
-  "sfURL"            -> "uhg dwaas.east-us-2.azure.snowflakecomputing.com", // your account URL (exactly as you used in Python)
-  "sfUser"           -> "BEERAVALLI_REDDY@OPTUM.COM",
-  "sfRole"           -> "AZU_SDRP_LUTF_STG_DEVELOPER_ROLE",
-  "sfWarehouse"      -> "LUTF_STG_EVISOR_WH",
-  "sfDatabase"       -> "LUTF_STG_EVISOR_DB",
-  "sfSchema"         -> "ETL",
-  "authenticator"    -> "SNOWFLAKE_JWT",
-  "pem_private_key"  -> pemB64
+  "sfURL"       -> "uhghdwaas.east-us-2.azure.snowflakecomputing.com",
+  "sfUser"      -> "BEERAVALLI_REDDY@OPTUM.COM",
+  "sfRole"      -> "AZU_SDRP_LUTF_STG_DEVELOPER_ROLE",
+  "sfWarehouse" -> "LUTF_STG_EVISOR_WH",
+  "sfDatabase"  -> "LUTF_STG_EVISOR_DB",
+  "sfSchema"    -> "ETL",
+  "authenticator" -> "SNOWFLAKE_JWT",
+  "pem_private_key" -> dbutils.fs.head("/dbfs/FileStore/keys/sf_pk_base64.txt") // <- your base64 from before
 )
 
-// ==================================================
-// 1) Build a KieBase from ALL DRLs in a DBFS folder
-// ==================================================
-def buildKieBaseFromFolder(dirDbfs: String) = {
-  val ks = KieServices.Factory.get
-  val kfs = ks.newKieFileSystem()
-
-  // list .drl files
-  val files = dbutils.fs.ls(dirDbfs).map(_.path).filter(_.toLowerCase.endsWith(".drl"))
-  require(files.nonEmpty, s"No .drl files found in $dirDbfs")
-
-  files.foreach { p =>
-    val body = dbutils.fs.head(p, 10 * 1024 * 1024)
-    kfs.write(ResourceFactory.newByteArrayResource(body.getBytes("UTF-8")).setSourcePath(p))
-  }
-
-  val kb: KieBuilder = ks.newKieBuilder(kfs).buildAll()
-  val res: Results   = kb.getResults
-  if (res.hasMessages(Message.Level.ERROR)) {
-    println("\n🚨 DROOLS BUILD ERRORS")
-    res.getMessages(Message.Level.ERROR).asScala.foreach(m => println("  " + m))
-    throw new IllegalStateException("DRL failed to compile")
-  }
-
-  ks.newKieContainer(ks.getRepository.getDefaultReleaseId).getKieBase
-}
-
-val kbase = buildKieBaseFromFolder("/dbfs/FileStore/rules")
-val kbaseBc = spark.sparkContext.broadcast(kbase)
-println(s"✅ Found DRLs: " + dbutils.fs.ls("dbfs:/FileStore/rules").map(_.name).mkString(", "))
-
-// ===================================================================
-// 2) Helper types + executors (per INDV_ID, per partition execution)
-// ===================================================================
-case class Out(indvId: Long, ruleNum: String, ruleFlag: Boolean, isActive: String)
-
-def toModel(r: Row): CommonDataObject.CommonDataModel = {
-  val m = new CommonDataObject.CommonDataModel()
-  // ---- set ONLY what the two rules use ----
-  // AdolescentImmuneRule uses: dob, continuity, elem_nbr, mem_name,
-  // effective_date, max_end_date, min_eff_date, final_end_date, grace_period, etc.
-  // AsthmaRule uses: age/elem_nbr/mem_name/elem_qty/negation element
-  // Map safely with null checks:
-
-  def asLong(name: String): java.lang.Integer =
-    if (r.isNullAt(r.fieldIndex(name))) null else r.getDecimal(r.fieldIndex(name)).longValue().toInt: java.lang.Integer
-  def asDouble(name: String): java.lang.Double =
-    if (r.isNullAt(r.fieldIndex(name))) null else r.getDouble(r.fieldIndex(name)): java.lang.Double
-  def asStr(name: String): String =
-    if (r.isNullAt(r.fieldIndex(name))) null else r.getString(r.fieldIndex(name))
-  def asDate(name: String): java.sql.Date =
-    if (r.isNullAt(r.fieldIndex(name))) null else java.sql.Date.valueOf(r.getDate(r.fieldIndex(name)))
-
-  // IDs / numerics
-  m.setIndv_id( if (r.isNullAt(r.fieldIndex("INDV_ID"))) null else r.getDecimal(r.fieldIndex("INDV_ID")).longValue().toInt: java.lang.Integer )
-  m.setElem_nbr( if (r.isNullAt(r.fieldIndex("ELEM_NBR"))) null else r.getDecimal(r.fieldIndex("ELEM_NBR")).longValue().toInt: java.lang.Integer )
-  m.setElem_qty( if (r.isNullAt(r.fieldIndex("ELEM_QTY"))) null else r.getDouble(r.fieldIndex("ELEM_QTY")): java.lang.Double )
-
-  // strings
-  m.setMem_name(asStr("MEM_NAME"))
-  m.setContinuity(asStr("CONTINUITY"))
-
-  // dates
-  m.setDob(asDate("DOB"))
-  m.setEffective_date(asDate("EFFECTIVE_DATE"))
-  m.setEnd_date(asDate("END_DATE"))
-  m.setMax_end_date(asDate("MAX_END_DATE"))
-  m.setMin_eff_date(asDate("MIN_EFF_DATE"))
-  m.setFinal_end_date(asDate("FINAL_END_DATE"))
-
-  // extra referenced by your helper methods
-  if (!r.isNullAt(r.fieldIndex("GRACE_PERIOD")))
-    m.setGrace_period(r.getDecimal(r.fieldIndex("GRACE_PERIOD")).intValue: java.lang.Integer)
-
-  m
-}
-
-def fireForOne(kb: org.kie.api.KieBase, indvId: Long, facts: Seq[CommonDataObject.CommonDataModel]): Seq[Out] = {
-  val sess: StatelessKieSession = kb.newStatelessKieSession()
-  val inserted = new JArrayList[Object]()
-  sess.addEventListener(new org.kie.api.event.rule.DefaultRuleRuntimeEventListener() {
-    override def objectInserted(event: org.kie.api.event.rule.ObjectInsertedEvent): Unit = {
-      inserted.add(event.getObject)
-    }
-  })
-
-  val bag = new JArrayList[Object]()
-  facts.foreach(bag.add)
-
-  sess.execute(bag)
-
-  inserted.asScala.collect {
-    case r: CommonDataObject.CommonDataResultSet =>
-      Out(indvId, Option(r.getStatus).getOrElse("NA"), true, "Y")
-  }.toSeq
-}
-
-def runPartitionedByIndv(df: DataFrame): DataFrame = {
-  val kbBc = kbaseBc
-  val rows = df
-    .repartitionByRange(col("INDV_ID"))
-    .mapPartitions { it =>
-      val kb = kbBc.value
-      // group facts by INDV_ID inside this partition
-      val byId = scala.collection.mutable.HashMap.empty[Long, scala.collection.mutable.ArrayBuffer[CommonDataObject.CommonDataModel]]
-      it.foreach { r =>
-        val id = r.getDecimal(r.fieldIndex("INDV_ID")).longValue()
-        val m  = toModel(r)
-        val buf = byId.getOrElseUpdate(id, scala.collection.mutable.ArrayBuffer.empty)
-        buf += m
-      }
-      byId.toIterator.flatMap { case (id, facts) => fireForOne(kb, id, facts.toSeq) }
-    }(org.apache.spark.sql.Encoders.product[Out])
-
-  rows.toDF()
-}
-
-// =============================================
-// 3) Read minimal columns from Snowflake
-// =============================================
-val neededCols = Seq(
-  "INDV_ID","ELEM_NBR","ELEM_QTY","MEM_NAME","CONTINUITY",
-  "DOB","EFFECTIVE_DATE","END_DATE","MAX_END_DATE","MIN_EFF_DATE","FINAL_END_DATE","GRACE_PERIOD"
-)
-
-val src = spark.read
+// read a small slice while we wire types — change/remove LIMIT later
+val df = spark.read
   .format("snowflake")
   .options(sfOptions)
-  .option("query", s"SELECT ${neededCols.mkString(",")} FROM ELEMENT_DATA_TABLE_KIS /* add WHERE/LIMIT for testing */")
+  .option("query", "SELECT * FROM ELEMENT_DATA_TABLE_KIS LIMIT 1000")
   .load()
 
-println("✅ Source schema:")
-src.printSchema()
+df.printSchema()
 
-// (optional) narrow for a quick test run
-val testDf = src.limit(100000) // adjust during shake-out
+// ===== 2) Null-safe getters (strongly typed) =====
+def gi(r: Row, name: String): java.lang.Integer =
+  Option(r.getAs[java.math.BigDecimal](name))
+    .map(_.intValue())
+    .orElse(Option(r.getAs[java.lang.Integer](name)))
+    .orNull
 
-// =============================================
-// 4) Execute rules partitioned by INDV_ID
-// =============================================
-val results = runPartitionedByIndv(testDf).cache()
+def gl(r: Row, name: String): java.lang.Long =
+  Option(r.getAs[java.math.BigDecimal](name))
+    .map(_.longValue())
+    .orElse(Option(r.getAs[java.lang.Long](name)))
+    .orNull
 
-println("\n🚀 RULE EXECUTION RESULTS (sample)")
-results.show(20, truncate = false)
+def gd(r: Row, name: String): java.lang.Double =
+  Option(r.getAs[java.lang.Double](name))
+    .orElse(Option(r.getAs[java.math.BigDecimal](name)).map(_.doubleValue()))
+    .orNull
 
-println(s"✅ TOTAL ROWS: ${results.count()}")
+def gf(r: Row, name: String): java.lang.Float =
+  Option(r.getAs[java.lang.Float](name))
+    .orElse(Option(r.getAs[java.lang.Double](name)).map(_.toFloat))
+    .orElse(Option(r.getAs[java.math.BigDecimal](name)).map(_.floatValue()))
+    .orNull
 
-// ======================================================
-// 5) (Optional) Write results back to Snowflake table
-//     STREAMLIT_RESULTS_KIS (indv_id, rule_num, rule_flag, is_active, audit_creat_dt)
-// ======================================================
-/*
-results
-  .withColumn("AUDIT_CREAT_DT", current_timestamp())
-  .write
-  .format("snowflake")
-  .options(sfOptions)
-  .option("dbtable", "STREAMLIT_RESULTS_KIS")
-  .mode("append")
-  .save()
-*/
+def gs(r: Row, name: String): String =
+  Option(r.getAs[String](name)).orNull
+
+def gdate(r: Row, name: String): java.sql.Date = {
+  // If Snowflake returns DateType you already get java.sql.Date. If it’s String, parse it.
+  val d1 = Option(r.getAs[java.sql.Date](name))
+  val d2 = Option(r.getAs[java.time.LocalDate](name)).map(java.sql.Date.valueOf)
+  val d3 = Option(r.getAs[String](name)).map(java.sql.Date.valueOf)
+  d1.orElse(d2).orElse(d3).orNull
+}
+
+// ===== 3) Row -> CommonDataModel (your full-args constructor) =====
+// Order MUST match your constructor exactly.
+// Based on your screenshot, adjust names if any don’t match Snowflake columns.
+def toModel(r: Row): CommonDataObject.CommonDataModel = {
+  new CommonDataObject.CommonDataModel(
+    gi(r, "INDV_ID"),
+    gi(r, "ELEM_NBR"),
+    gd(r, "ELEM_QTY"),
+    gi(r, "AGE"),
+    gs(r, "MEM_NAME"),
+    gdate(r, "ELEM_DT_1"),
+    gdate(r, "ELEM_DT_2"),
+    gs(r, "SCOR_TYP_CD"),
+    gd(r, "SCOR_VAL"),
+    gi(r, "PRG_SRVC_ID"),          // Snowflake shows FLOAT; your class had Integer -> coerced
+    gdate(r, "TRM_DT"),
+    gdate(r, "EFF_DT"),            // if you have both EFF_DT and EFFECTIVE_DATE, keep the one your class defines
+    gdate(r, "EFFECTIVE_DATE"),
+    gs(r, "ST_ABBR_CD"),
+    gs(r, "OPTUM_SEG_ID"),
+    gdate(r, "ID_RUN_DT"),
+    gi(r, "OUTBOUND_FILE_ID"),
+    gs(r, "SCEN_RULE_CD"),
+    gdate(r, "DOB"),
+    gdate(r, "EFFECTIVE_DATE"),    // (dup in schema screenshot — keep the one your field expects)
+    gdate(r, "END_DATE"),
+    gs(r, "MED_DX_OF_INTEREST"),
+    gs(r, "SCENARIO_CD"),
+    gdate(r, "NEXT_EFFECTIVE_DATE"),
+    gi(r, "GRACE_PERIOD"),
+    gdate(r, "MIN_EFF_DATE"),
+    gdate(r, "MAX_END_DATE"),
+    gdate(r, "FINAL_END_DATE"),
+    gs(r, "ADT_CHIEF_COMPLAINT"),
+    gs(r, "ELEM_SUP"),
+    gs(r, "CONTINUITY"),
+    gf(r, "MED_COV"),
+    gf(r, "REL_IPTNT_RISK_12_MO_NBR")
+  )
+}
+
+// Quick sanity: try building one model
+val sample = df.limit(1).collect()(0)
+val model  = toModel(sample)
+println(s"✅ Built CommonDataModel for INDV_ID=${model.getIndv_id()}")
+
+// ===== 4) If you want to fire rules per INDV_ID (mini test) =====
+// Re-use your existing rule loader/session creator.
+import org.kie.api.KieServices
+import org.kie.api.io.ResourceType
+import org.kie.internal.io.ResourceFactory
+import org.kie.api.runtime.StatelessKieSession
+import org.kie.api.builder.{KieBuilder, Message, Results}
+
+def buildSessionFromFolderVerbose(dirDbfs: String): StatelessKieSession = {
+  val ks = KieServices.Factory.get
+  val kfs = ks.newKieFileSystem()
+  // Add all .drl files under a DBFS folder
+  dbutils.fs.ls(dirDbfs).filter(_.name.endsWith(".drl")).foreach { f =>
+    val body = dbutils.fs.head(f.path)
+    kfs.write(ResourceFactory.newByteArrayResource(body.getBytes("UTF-8")).setSourcePath(f.path))
+  }
+  val kb: KieBuilder = ks.newKieBuilder(kfs).buildAll()
+  val res: Results = kb.getResults
+  if (res.hasMessages(Message.Level.ERROR)) {
+    println("\n🚨 DROOLS BUILD ERRORS")
+    res.getMessages(Message.Level.ERROR).forEach(m => println("  - " + m))
+    throw new IllegalStateException("DRL failed to compile")
+  }
+  ks.newKieContainer(ks.getRepository.getDefaultReleaseId).getKieBase.newStatelessKieSession()
+}
+
+// build once
+val sess = buildSessionFromFolderVerbose("/dbfs/FileStore/rules")
+
+// global for results (like before)
+val result = new java.util.HashMap[String, Object]()
+sess.setGlobal("result", result)
+
+// take a small set for a smoke test; later replace with full partition logic
+val testFacts = df.limit(1000).collect().map(toModel).toSeq
+
+// execute per INDV_ID (tiny demo)
+case class Out(indvId: Long, ruleNum: String, ruleFlag: Boolean, isActive: String)
+import org.kie.api.runtime.ClassObjectFilter
+
+def fire(facts: Seq[CommonDataObject.CommonDataModel]): Seq[Out] = {
+  result.clear()
+  sess.execute(facts.asJava)
+  sess.execute(new java.util.ArrayList[Object](), new ClassObjectFilter(classOf[CommonDataObject.CommonDataResultSet]))
+  // map to Out (your ResultSet only has status now; fill others as you add fields)
+  Seq(Out(
+    Option(facts.head).map(_.getIndv_id().toLong).getOrElse(0L),
+    Option(result.get("ruleNum")).map(_.toString).getOrElse("NA"),
+    Option(result.get("ruleFlag")).exists(_.toString.equalsIgnoreCase("true")),
+    Option(result.get("isActive")).map(_.toString).getOrElse("Y")
+  ))
+}
+
+val outs = testFacts.groupBy(_.getIndv_id()).toSeq.flatMap{ case (_, facts) => fire(facts) }
+println(s"🔥 Fired groups: ${outs.size}")
+outs.take(10).foreach(println)
