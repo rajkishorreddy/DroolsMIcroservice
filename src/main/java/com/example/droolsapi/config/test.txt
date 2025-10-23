@@ -1,38 +1,33 @@
-// ====== Fixed helpers ======
-def gi(r: Row, name: String): java.lang.Integer =
-  Option(r.getAs[java.math.BigDecimal](name))
-    .map(_.intValue())
-    .orElse(Option(r.getAs[java.lang.Integer](name)))
-    .getOrElse(null.asInstanceOf[java.lang.Integer])
+// keep your imports (incl. ClassObjectFilter) above
 
-def gl(r: Row, name: String): java.lang.Long =
-  Option(r.getAs[java.math.BigDecimal](name))
-    .map(_.longValue())
-    .orElse(Option(r.getAs[java.lang.Long](name)))
-    .getOrElse(null.asInstanceOf[java.lang.Long])
+case class Out(indvId: Long, ruleNum: String, ruleFlag: Boolean, isActive: String)
 
-def gd(r: Row, name: String): java.lang.Double =
-  Option(r.getAs[java.lang.Double](name))
-    .orElse(Option(r.getAs[java.math.BigDecimal](name)).map(_.doubleValue()))
-    .getOrElse(null.asInstanceOf[java.lang.Double])
+def fire(facts: Seq[CommonDataObject.CommonDataModel]): Seq[Out] = {
+  result.clear()
+  sess.execute(facts.asJava)
+  // capture CommonDataResultSet produced by the rules
+  sess.execute(new java.util.ArrayList[Object](), new org.kie.api.runtime.ClassObjectFilter(classOf[CommonDataObject.CommonDataResultSet]))
 
-def gf(r: Row, name: String): java.lang.Float =
-  Option(r.getAs[java.lang.Float](name))
-    .orElse(Option(r.getAs[java.lang.Double](name)).map(_.toFloat))
-    .orElse(Option(r.getAs[java.math.BigDecimal](name)).map(_.floatValue()))
-    .getOrElse(null.asInstanceOf[java.lang.Float])
-
-def gs(r: Row, name: String): String =
-  Option(r.getAs[String](name)).getOrElse(null.asInstanceOf[String])
-
-def gdate(r: Row, name: String): java.sql.Date = {
-  val d1 = Option(r.getAs[java.sql.Date](name))
-  val d2 = Option(r.getAs[java.time.LocalDate](name)).map(java.sql.Date.valueOf)
-  val d3 = Option(r.getAs[String](name)).map(java.sql.Date.valueOf)
-  d1.orElse(d2).orElse(d3).getOrElse(null.asInstanceOf[java.sql.Date])
+  Seq(
+    Out(
+      facts.headOption
+        .flatMap(m => Option(m.getIndv_id()).map(_.longValue()))  // Integer -> Long, null-safe
+        .getOrElse(-1L),
+      Option(result.get("ruleNum")).map(_.toString).getOrElse("NA"),
+      Option(result.get("ruleFlag")).exists(_.toString.equalsIgnoreCase("true")),
+      Option(result.get("isActive")).map(_.toString).getOrElse("Y")
+    )
+  )
 }
 
-// ===== Group + Fire test again =====
-val outs = testFacts.groupBy(_.getIndv_id()).toSeq.flatMap { case (_, facts) => fire(facts) }
+// ---- group by INDV_ID (null-safe) and fire once per INDV_ID ----
+val outs: Seq[Out] =
+  testFacts
+    .groupBy(m => Option(m.getIndv_id()).map(_.longValue()).getOrElse(-1L)) // key: Long
+    .values                                    // Iterable[Seq[CommonDataModel]]
+    .toSeq
+    .flatMap(fire)
+
+// sanity print
 println(s"🔥 Fired groups: ${outs.size}")
 outs.take(10).foreach(println)
