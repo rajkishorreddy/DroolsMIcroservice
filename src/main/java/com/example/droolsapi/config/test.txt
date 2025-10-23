@@ -1,164 +1,38 @@
-%scala
-import org.apache.spark.sql.{Row, DataFrame}
-import org.apache.spark.sql.functions._
-import scala.collection.JavaConverters._
-import scala.util.Try
-
-// ===== 1) Snowflake read (reuse your working sfOptions) =====
-val sfOptions = Map(
-  "sfURL"       -> "uhghdwaas.east-us-2.azure.snowflakecomputing.com",
-  "sfUser"      -> "BEERAVALLI_REDDY@OPTUM.COM",
-  "sfRole"      -> "AZU_SDRP_LUTF_STG_DEVELOPER_ROLE",
-  "sfWarehouse" -> "LUTF_STG_EVISOR_WH",
-  "sfDatabase"  -> "LUTF_STG_EVISOR_DB",
-  "sfSchema"    -> "ETL",
-  "authenticator" -> "SNOWFLAKE_JWT",
-  "pem_private_key" -> dbutils.fs.head("/dbfs/FileStore/keys/sf_pk_base64.txt") // <- your base64 from before
-)
-
-// read a small slice while we wire types — change/remove LIMIT later
-val df = spark.read
-  .format("snowflake")
-  .options(sfOptions)
-  .option("query", "SELECT * FROM ELEMENT_DATA_TABLE_KIS LIMIT 1000")
-  .load()
-
-df.printSchema()
-
-// ===== 2) Null-safe getters (strongly typed) =====
+// ====== Fixed helpers ======
 def gi(r: Row, name: String): java.lang.Integer =
   Option(r.getAs[java.math.BigDecimal](name))
     .map(_.intValue())
     .orElse(Option(r.getAs[java.lang.Integer](name)))
-    .orNull
+    .getOrElse(null.asInstanceOf[java.lang.Integer])
 
 def gl(r: Row, name: String): java.lang.Long =
   Option(r.getAs[java.math.BigDecimal](name))
     .map(_.longValue())
     .orElse(Option(r.getAs[java.lang.Long](name)))
-    .orNull
+    .getOrElse(null.asInstanceOf[java.lang.Long])
 
 def gd(r: Row, name: String): java.lang.Double =
   Option(r.getAs[java.lang.Double](name))
     .orElse(Option(r.getAs[java.math.BigDecimal](name)).map(_.doubleValue()))
-    .orNull
+    .getOrElse(null.asInstanceOf[java.lang.Double])
 
 def gf(r: Row, name: String): java.lang.Float =
   Option(r.getAs[java.lang.Float](name))
     .orElse(Option(r.getAs[java.lang.Double](name)).map(_.toFloat))
     .orElse(Option(r.getAs[java.math.BigDecimal](name)).map(_.floatValue()))
-    .orNull
+    .getOrElse(null.asInstanceOf[java.lang.Float])
 
 def gs(r: Row, name: String): String =
-  Option(r.getAs[String](name)).orNull
+  Option(r.getAs[String](name)).getOrElse(null.asInstanceOf[String])
 
 def gdate(r: Row, name: String): java.sql.Date = {
-  // If Snowflake returns DateType you already get java.sql.Date. If it’s String, parse it.
   val d1 = Option(r.getAs[java.sql.Date](name))
   val d2 = Option(r.getAs[java.time.LocalDate](name)).map(java.sql.Date.valueOf)
   val d3 = Option(r.getAs[String](name)).map(java.sql.Date.valueOf)
-  d1.orElse(d2).orElse(d3).orNull
+  d1.orElse(d2).orElse(d3).getOrElse(null.asInstanceOf[java.sql.Date])
 }
 
-// ===== 3) Row -> CommonDataModel (your full-args constructor) =====
-// Order MUST match your constructor exactly.
-// Based on your screenshot, adjust names if any don’t match Snowflake columns.
-def toModel(r: Row): CommonDataObject.CommonDataModel = {
-  new CommonDataObject.CommonDataModel(
-    gi(r, "INDV_ID"),
-    gi(r, "ELEM_NBR"),
-    gd(r, "ELEM_QTY"),
-    gi(r, "AGE"),
-    gs(r, "MEM_NAME"),
-    gdate(r, "ELEM_DT_1"),
-    gdate(r, "ELEM_DT_2"),
-    gs(r, "SCOR_TYP_CD"),
-    gd(r, "SCOR_VAL"),
-    gi(r, "PRG_SRVC_ID"),          // Snowflake shows FLOAT; your class had Integer -> coerced
-    gdate(r, "TRM_DT"),
-    gdate(r, "EFF_DT"),            // if you have both EFF_DT and EFFECTIVE_DATE, keep the one your class defines
-    gdate(r, "EFFECTIVE_DATE"),
-    gs(r, "ST_ABBR_CD"),
-    gs(r, "OPTUM_SEG_ID"),
-    gdate(r, "ID_RUN_DT"),
-    gi(r, "OUTBOUND_FILE_ID"),
-    gs(r, "SCEN_RULE_CD"),
-    gdate(r, "DOB"),
-    gdate(r, "EFFECTIVE_DATE"),    // (dup in schema screenshot — keep the one your field expects)
-    gdate(r, "END_DATE"),
-    gs(r, "MED_DX_OF_INTEREST"),
-    gs(r, "SCENARIO_CD"),
-    gdate(r, "NEXT_EFFECTIVE_DATE"),
-    gi(r, "GRACE_PERIOD"),
-    gdate(r, "MIN_EFF_DATE"),
-    gdate(r, "MAX_END_DATE"),
-    gdate(r, "FINAL_END_DATE"),
-    gs(r, "ADT_CHIEF_COMPLAINT"),
-    gs(r, "ELEM_SUP"),
-    gs(r, "CONTINUITY"),
-    gf(r, "MED_COV"),
-    gf(r, "REL_IPTNT_RISK_12_MO_NBR")
-  )
-}
-
-// Quick sanity: try building one model
-val sample = df.limit(1).collect()(0)
-val model  = toModel(sample)
-println(s"✅ Built CommonDataModel for INDV_ID=${model.getIndv_id()}")
-
-// ===== 4) If you want to fire rules per INDV_ID (mini test) =====
-// Re-use your existing rule loader/session creator.
-import org.kie.api.KieServices
-import org.kie.api.io.ResourceType
-import org.kie.internal.io.ResourceFactory
-import org.kie.api.runtime.StatelessKieSession
-import org.kie.api.builder.{KieBuilder, Message, Results}
-
-def buildSessionFromFolderVerbose(dirDbfs: String): StatelessKieSession = {
-  val ks = KieServices.Factory.get
-  val kfs = ks.newKieFileSystem()
-  // Add all .drl files under a DBFS folder
-  dbutils.fs.ls(dirDbfs).filter(_.name.endsWith(".drl")).foreach { f =>
-    val body = dbutils.fs.head(f.path)
-    kfs.write(ResourceFactory.newByteArrayResource(body.getBytes("UTF-8")).setSourcePath(f.path))
-  }
-  val kb: KieBuilder = ks.newKieBuilder(kfs).buildAll()
-  val res: Results = kb.getResults
-  if (res.hasMessages(Message.Level.ERROR)) {
-    println("\n🚨 DROOLS BUILD ERRORS")
-    res.getMessages(Message.Level.ERROR).forEach(m => println("  - " + m))
-    throw new IllegalStateException("DRL failed to compile")
-  }
-  ks.newKieContainer(ks.getRepository.getDefaultReleaseId).getKieBase.newStatelessKieSession()
-}
-
-// build once
-val sess = buildSessionFromFolderVerbose("/dbfs/FileStore/rules")
-
-// global for results (like before)
-val result = new java.util.HashMap[String, Object]()
-sess.setGlobal("result", result)
-
-// take a small set for a smoke test; later replace with full partition logic
-val testFacts = df.limit(1000).collect().map(toModel).toSeq
-
-// execute per INDV_ID (tiny demo)
-case class Out(indvId: Long, ruleNum: String, ruleFlag: Boolean, isActive: String)
-import org.kie.api.runtime.ClassObjectFilter
-
-def fire(facts: Seq[CommonDataObject.CommonDataModel]): Seq[Out] = {
-  result.clear()
-  sess.execute(facts.asJava)
-  sess.execute(new java.util.ArrayList[Object](), new ClassObjectFilter(classOf[CommonDataObject.CommonDataResultSet]))
-  // map to Out (your ResultSet only has status now; fill others as you add fields)
-  Seq(Out(
-    Option(facts.head).map(_.getIndv_id().toLong).getOrElse(0L),
-    Option(result.get("ruleNum")).map(_.toString).getOrElse("NA"),
-    Option(result.get("ruleFlag")).exists(_.toString.equalsIgnoreCase("true")),
-    Option(result.get("isActive")).map(_.toString).getOrElse("Y")
-  ))
-}
-
-val outs = testFacts.groupBy(_.getIndv_id()).toSeq.flatMap{ case (_, facts) => fire(facts) }
+// ===== Group + Fire test again =====
+val outs = testFacts.groupBy(_.getIndv_id()).toSeq.flatMap { case (_, facts) => fire(facts) }
 println(s"🔥 Fired groups: ${outs.size}")
 outs.take(10).foreach(println)
