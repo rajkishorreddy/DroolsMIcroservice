@@ -2,48 +2,57 @@
 import org.kie.api.KieServices
 import org.kie.api.builder.{KieBuilder, Message, Results}
 import org.kie.internal.io.ResourceFactory
-import org.kie.api.runtime.StatelessKieSession
+import org.kie.api.runtime.rule.AgendaFilter
+import org.kie.api.runtime.ClassObjectFilter
+import org.kie.api.runtime.KieSession
 import java.nio.charset.StandardCharsets
 import java.sql.Date
 import scala.collection.JavaConverters._
 import CommonDataObject.{CommonDataModel, CommonDataResultSet}
 
-// === Build Drools session ===
-def buildSessionFromFolderVerbose(dirDbfs: String): StatelessKieSession = {
-  val ks = KieServices.Factory.get
+// ---------- build KieSession (STATEFUL) from DBFS folder ----------
+def buildStatefulSessionFromFolder(dirDbfs: String): KieSession = {
+  val ks  = KieServices.Factory.get
   val kfs = ks.newKieFileSystem()
   val dirLocal = dirDbfs.replace("dbfs:/", "/dbfs/")
-  val drlFiles = new java.io.File(dirLocal).listFiles.filter(f => f.isFile && f.getName.endsWith(".drl"))
+
+  val drlFiles = Option(new java.io.File(dirLocal).listFiles)
+    .getOrElse(Array.empty)
+    .filter(f => f.isFile && f.getName.endsWith(".drl"))
+
   println(s"🧩 Found DRLs: ${drlFiles.map(_.getName).mkString(", ")}")
 
   drlFiles.foreach { f =>
     val body = scala.io.Source.fromFile(f, "UTF-8").mkString
-    kfs.write(ResourceFactory
-      .newByteArrayResource(body.getBytes(StandardCharsets.UTF_8))
-      .setSourcePath(s"rules/${f.getName}"))
+    kfs.write(
+      ResourceFactory
+        .newByteArrayResource(body.getBytes(StandardCharsets.UTF_8))
+        .setSourcePath(s"rules/${f.getName}")
+    )
   }
 
-  val kb: KieBuilder = ks.newKieBuilder(kfs).buildAll()
-  val res: Results = kb.getResults
+  val kb: KieBuilder = KieServices.Factory.get.newKieBuilder(kfs).buildAll()
+  val res: Results   = kb.getResults
   if (res.hasMessages(Message.Level.ERROR)) {
-    println("❌ Build errors:")
+    println("❌ DRL build errors:")
     res.getMessages(Message.Level.ERROR).forEach(m => println("  " + m))
     throw new IllegalStateException("DRL compile failed")
   }
 
-  ks.newKieContainer(ks.getRepository.getDefaultReleaseId)
-    .getKieBase
-    .newStatelessKieSession()
+  val kContainer = ks.newKieContainer(ks.getRepository.getDefaultReleaseId)
+  val kbase = kContainer.getKieBase
+  kbase.newKieSession()   // <<— STATEFUL
 }
 
 def d(s: String): java.sql.Date = Date.valueOf(s)
-val sess = buildSessionFromFolderVerbose("dbfs:/FileStore/rules")
-println("✅ Drools Session Loaded")
 
-// === Dummy facts ===
+val ksession = buildStatefulSessionFromFolder("dbfs:/FileStore/rules")
+println("✅ Drools stateful session loaded")
+
+// ---------- dummy facts ----------
 val indv = 12345: java.lang.Integer
 
-// Adolescent rule
+// Adolescent rule facts (a,b,c)
 val a = new CommonDataModel()
 a.setIndv_id(indv)
 a.setDob(d("2013-08-15"))
@@ -63,7 +72,7 @@ c.setElem_nbr(3327: java.lang.Integer)
 c.setMem_name("INDV_ELEMENTS_ATTR_EG")
 c.setContinuity("365D_Continuous")
 
-// Asthma rule
+// Asthma rule facts (p,q,r) — include if you want that rule to fire too
 val p = new CommonDataModel()
 p.setIndv_id(indv)
 p.setAge(25: java.lang.Integer)
@@ -80,25 +89,33 @@ r.setIndv_id(indv)
 r.setElem_nbr(1021: java.lang.Integer)
 r.setMem_name("INDV_ELEMENTS_ADJ")
 
-// === Helper case class and executor ===
+// ---------- runner that returns CommonDataResultSet ----------
 case class Out(indvId: Long, ruleNum: String, ruleFlag: Boolean, isActive: String)
 
-def runRuleAndCollectMany(facts: Seq[CommonDataModel]): Seq[Out] = {
-  val factsList = new java.util.ArrayList[Object]()
-  facts.foreach(factsList.add)
-  
-  // Execute once and capture results
-  val inserted = new java.util.ArrayList[Object]()
-  sess.execute(factsList)
-  factsList.asScala.collect {
-    case r: CommonDataResultSet =>
-      Out(indv.longValue, Option(r.getStatus).getOrElse("NA"), true, "Y")
-  }.toSeq
+def fireAndCollect(facts: Seq[CommonDataModel]): Seq[Out] = {
+  try {
+    // insert all facts
+    facts.foreach(ksession.insert)
+    val fired = ksession.fireAllRules()
+    println(s"🔥 Rules fired count: $fired")
+
+    // collect inserted results
+    val results = ksession.getObjects(new ClassObjectFilter(classOf[CommonDataResultSet]))
+      .asScala
+      .collect { case r: CommonDataResultSet =>
+        Out(indv.longValue, Option(r.getStatus).getOrElse("NA"), true, "Y")
+      }
+      .toSeq
+    results
+  } finally {
+    ksession.dispose()
+  }
 }
 
-// === Execute all ===
-val outs = runRuleAndCollectMany(Seq(a, b, c, p, q, r))
+// ---------- choose which set you want to run ----------
+val outs = fireAndCollect(Seq(a,b,c))               // only Adolescent
+// val outs = fireAndCollect(Seq(a,b,c,p,q,r))      // Adolescent + Asthma
 
-println("\n🚀 RULE EXECUTION RESULTS 🚀")
+println("\n🚀 RULE EXECUTION RESULTS")
 outs.foreach(o => println(s"→ INDV: ${o.indvId}, STATUS: ${o.ruleNum}, ACTIVE: ${o.isActive}"))
-println(s"\n✅ TOTAL RULES FIRED: ${outs.size}")
+println(s"\n✅ TOTAL RULES FIRED (collected): ${outs.size}")
