@@ -1,35 +1,46 @@
 from base64 import b64encode
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.backends import default_backend
 
 key_path = "/dbfs/FileStore/keys/rsa_key.p8"
-passphrase = dbutils.secrets.get("snowflake", "rsa_passphrase")
+passphrase = "987654321"   # replace with your actual passphrase
 
-with open(key_path, "rb") as f:
-    pkey = serialization.load_pem_private_key(
-        f.read(),
-        password=passphrase.encode() if passphrase else None,
+def get_private_key():
+    # Load the encrypted PEM and decode to unencrypted PKCS#8 DER bytes
+    with open(key_path, "rb") as key_file:
+        p_key = serialization.load_pem_private_key(
+            key_file.read(),
+            password=passphrase.encode(),
+            backend=default_backend()
+        )
+
+    # Convert to unencrypted PKCS#8 DER (binary)
+    private_bytes = p_key.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
     )
 
-der_bytes = pkey.private_bytes(
-    encoding=serialization.Encoding.DER,
-    format=serialization.PrivateFormat.PKCS8,
-    encryption_algorithm=serialization.NoEncryption(),
-)
-der_b64 = b64encode(der_bytes).decode()
+    # Base64-encode it (this is what Snowflake connector expects)
+    return b64encode(private_bytes).decode("utf-8")
 
+# ---- Snowflake connection options ----
 sfOptions = {
-  "sfURL": "<account>.snowflakecomputing.com",
-  "sfUser": "<USER_EMAIL>",
-  "sfRole": "AZU_SDRP_LUTF_STG_DEVELOPER_ROLE",
-  "sfWarehouse": "LUTF_STG_EVISOR_WH",
-  "sfDatabase": "LUTF_STG_EVISOR_DB",
-  "sfSchema": "ETL",
-  "authenticator": "SNOWFLAKE_JWT",
-  "pem_private_key": der_b64
+    "sfURL": "uhgdwaas.east-us-2.azure.snowflakecomputing.com",
+    "sfUser": "BEERAVALLI_REDDY@OPTUM.COM",
+    "sfRole": "AZU_SDRP_LUTF_STG_DEVELOPER_ROLE",
+    "sfWarehouse": "LUTF_STG_EVISOR_WH",
+    "sfDatabase": "LUTF_STG_EVISOR_DB",
+    "sfSchema": "ETL",
+    "authenticator": "SNOWFLAKE_JWT",
+    "pem_private_key": get_private_key()
 }
 
-df = (spark.read.format("snowflake")
+# ---- Test query ----
+df = (spark.read
+      .format("snowflake")
       .options(**sfOptions)
-      .option("query", "SELECT 1")
+      .option("query", "SELECT CURRENT_ROLE(), CURRENT_DATABASE(), CURRENT_SCHEMA()")
       .load())
+
 df.show()
