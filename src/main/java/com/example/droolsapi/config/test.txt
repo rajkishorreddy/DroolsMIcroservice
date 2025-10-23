@@ -2,120 +2,92 @@
 import org.kie.api.KieServices
 import org.kie.api.builder.{KieBuilder, Message, Results}
 import org.kie.internal.io.ResourceFactory
-import org.kie.api.runtime.rule.AgendaFilter
+import org.kie.api.runtime.{KieSession, KieBase}
 import org.kie.api.runtime.ClassObjectFilter
-import org.kie.api.runtime.KieSession
 import java.nio.charset.StandardCharsets
-import java.sql.Date
 import scala.collection.JavaConverters._
+import java.sql.Date
 import CommonDataObject.{CommonDataModel, CommonDataResultSet}
 
-// ---------- build KieSession (STATEFUL) from DBFS folder ----------
-def buildStatefulSessionFromFolder(dirDbfs: String): KieSession = {
+// ---------- build KieBase once (we’ll create a new session per member) ----------
+def buildKieBaseFromFolder(dirDbfs: String): KieBase = {
   val ks  = KieServices.Factory.get
   val kfs = ks.newKieFileSystem()
   val dirLocal = dirDbfs.replace("dbfs:/", "/dbfs/")
+  val drls = Option(new java.io.File(dirLocal).listFiles).getOrElse(Array()).filter(f => f.isFile && f.getName.endsWith(".drl"))
+  println(s"🧩 Found DRLs: ${drls.map(_.getName).mkString(", ")}")
 
-  val drlFiles = Option(new java.io.File(dirLocal).listFiles)
-    .getOrElse(Array.empty)
-    .filter(f => f.isFile && f.getName.endsWith(".drl"))
-
-  println(s"🧩 Found DRLs: ${drlFiles.map(_.getName).mkString(", ")}")
-
-  drlFiles.foreach { f =>
+  drls.foreach { f =>
     val body = scala.io.Source.fromFile(f, "UTF-8").mkString
-    kfs.write(
-      ResourceFactory
-        .newByteArrayResource(body.getBytes(StandardCharsets.UTF_8))
-        .setSourcePath(s"rules/${f.getName}")
-    )
+    kfs.write(ResourceFactory.newByteArrayResource(body.getBytes(StandardCharsets.UTF_8)).setSourcePath(s"rules/${f.getName}"))
   }
 
-  val kb: KieBuilder = KieServices.Factory.get.newKieBuilder(kfs).buildAll()
+  val ksrv = KieServices.Factory.get
+  val kb: KieBuilder = ksrv.newKieBuilder(kfs).buildAll()
   val res: Results   = kb.getResults
   if (res.hasMessages(Message.Level.ERROR)) {
-    println("❌ DRL build errors:")
-    res.getMessages(Message.Level.ERROR).forEach(m => println("  " + m))
+    res.getMessages(Message.Level.ERROR).forEach(m => println("❌ " + m))
     throw new IllegalStateException("DRL compile failed")
   }
-
-  val kContainer = ks.newKieContainer(ks.getRepository.getDefaultReleaseId)
-  val kbase = kContainer.getKieBase
-  kbase.newKieSession()   // <<— STATEFUL
+  ksrv.newKieContainer(ksrv.getRepository.getDefaultReleaseId).getKieBase
 }
 
-def d(s: String): java.sql.Date = Date.valueOf(s)
+def d(s: String) = Date.valueOf(s)
 
-val ksession = buildStatefulSessionFromFolder("dbfs:/FileStore/rules")
-println("✅ Drools stateful session loaded")
+// ---------- collector output ----------
+case class Out(indvId: Long, status: String, active: String)
 
-// ---------- dummy facts ----------
-val indv = 12345: java.lang.Integer
-
-// Adolescent rule facts (a,b,c)
-val a = new CommonDataModel()
-a.setIndv_id(indv)
-a.setDob(d("2013-08-15"))
-
-val b = new CommonDataModel()
-b.setIndv_id(indv)
-b.setContinuity("365D_Continuous")
-b.setEffective_date(d("2024-01-01"))
-b.setMax_end_date(d("2023-12-31"))
-b.setMin_eff_date(d("2023-01-01"))
-b.setFinal_end_date(d("2024-12-31"))
-b.setGrace_period(400: java.lang.Integer)
-
-val c = new CommonDataModel()
-c.setIndv_id(indv)
-c.setElem_nbr(3327: java.lang.Integer)
-c.setMem_name("INDV_ELEMENTS_ATTR_EG")
-c.setContinuity("365D_Continuous")
-
-// Asthma rule facts (p,q,r) — include if you want that rule to fire too
-val p = new CommonDataModel()
-p.setIndv_id(indv)
-p.setAge(25: java.lang.Integer)
-p.setElem_nbr(3018: java.lang.Integer)
-p.setMem_name("INDV_ELEMENTS_ATTR_EG")
-
-val q = new CommonDataModel()
-q.setIndv_id(indv)
-q.setElem_nbr(1125: java.lang.Integer)
-q.setMem_name("INDV_ELEMENTS_EBM")
-
-val r = new CommonDataModel()
-r.setIndv_id(indv)
-r.setElem_nbr(1021: java.lang.Integer)
-r.setMem_name("INDV_ELEMENTS_ADJ")
-
-// ---------- runner that returns CommonDataResultSet ----------
-case class Out(indvId: Long, ruleNum: String, ruleFlag: Boolean, isActive: String)
-
-def fireAndCollect(facts: Seq[CommonDataModel]): Seq[Out] = {
+// run rules for exactly one member (new session), collect CommonDataResultSet
+def fireForOne(kbase: KieBase, indvId: Long, facts: Seq[CommonDataModel]): Seq[Out] = {
+  val ksession: KieSession = kbase.newKieSession()
   try {
-    // insert all facts
     facts.foreach(ksession.insert)
     val fired = ksession.fireAllRules()
-    println(s"🔥 Rules fired count: $fired")
-
-    // collect inserted results
-    val results = ksession.getObjects(new ClassObjectFilter(classOf[CommonDataResultSet]))
+    // println(s"INDV $indvId -> fired $fired")
+    ksession.getObjects(new ClassObjectFilter(classOf[CommonDataResultSet]))
       .asScala
-      .collect { case r: CommonDataResultSet =>
-        Out(indv.longValue, Option(r.getStatus).getOrElse("NA"), true, "Y")
-      }
+      .collect { case r: CommonDataResultSet => Out(indvId, Option(r.getStatus).getOrElse("NA"), "Y") }
       .toSeq
-    results
-  } finally {
-    ksession.dispose()
-  }
+  } finally ksession.dispose()
 }
 
-// ---------- choose which set you want to run ----------
-val outs = fireAndCollect(Seq(a,b,c))               // only Adolescent
-// val outs = fireAndCollect(Seq(a,b,c,p,q,r))      // Adolescent + Asthma
+// ---------- PUBLIC API: partition by indv_id ----------
+def runPartitionedByIndv(facts: Seq[CommonDataModel], rulesDir: String = "dbfs:/FileStore/rules"): Seq[Out] = {
+  val kbase = buildKieBaseFromFolder(rulesDir)
+  val groups: Map[Long, Seq[CommonDataModel]] =
+    facts.groupBy(f => Option(f.getIndv_id).map(_.longValue).getOrElse(-1L))
+  groups.toSeq.sortBy(_._1).flatMap { case (indvId, fs) => fireForOne(kbase, indvId, fs) }
+}
 
-println("\n🚀 RULE EXECUTION RESULTS")
-outs.foreach(o => println(s"→ INDV: ${o.indvId}, STATUS: ${o.ruleNum}, ACTIVE: ${o.isActive}"))
-println(s"\n✅ TOTAL RULES FIRED (collected): ${outs.size}")
+// ================== DEMO DATA (2 members) ==================
+// Member 1: should PASS Adolescent + has supporting facts for Asthma
+val indv1 = 12345: java.lang.Integer
+val a = new CommonDataModel(); a.setIndv_id(indv1); a.setDob(d("2013-08-15"))
+val b = new CommonDataModel(); b.setIndv_id(indv1); b.setContinuity("365D_Continuous")
+b.setEffective_date(d("2024-01-01")); b.setMax_end_date(d("2023-12-31"))
+b.setMin_eff_date(d("2023-01-01"));  b.setFinal_end_date(d("2024-12-31"))
+b.setGrace_period(400: java.lang.Integer)
+val c = new CommonDataModel(); c.setIndv_id(indv1); c.setElem_nbr(3327: java.lang.Integer)
+c.setMem_name("INDV_ELEMENTS_ATTR_EG"); c.setContinuity("365D_Continuous")
+// Asthma supporting facts for same member
+val p = new CommonDataModel(); p.setIndv_id(indv1); p.setAge(25: java.lang.Integer)
+p.setElem_nbr(3018: java.lang.Integer); p.setMem_name("INDV_ELEMENTS_ATTR_EG")
+val q = new CommonDataModel(); q.setIndv_id(indv1); q.setElem_nbr(1125: java.lang.Integer); q.setMem_name("INDV_ELEMENTS_EBM")
+val r = new CommonDataModel(); r.setIndv_id(indv1); r.setElem_nbr(1021: java.lang.Integer); r.setMem_name("INDV_ELEMENTS_ADJ")
+
+// Member 2: different person, tweak so maybe only Asthma or nothing fires
+val indv2 = 99999: java.lang.Integer
+val a2 = new CommonDataModel(); a2.setIndv_id(indv2); a2.setDob(d("1990-01-01")) // not adolescent
+val p2 = new CommonDataModel(); p2.setIndv_id(indv2); p2.setAge(50: java.lang.Integer)
+p2.setElem_nbr(3018: java.lang.Integer); p2.setMem_name("INDV_ELEMENTS_ATTR_EG")
+val q2 = new CommonDataModel(); q2.setIndv_id(indv2); q2.setElem_nbr(1125: java.lang.Integer); q2.setMem_name("INDV_ELEMENTS_EBM")
+
+// Combine all facts (mixed indv_ids) and run
+val allFacts: Seq[CommonDataModel] = Seq(a,b,c,p,q,r, a2,p2,q2)
+val outs = runPartitionedByIndv(allFacts, "dbfs:/FileStore/rules")
+
+println("\n🚀 RESULTS (partitioned by INDV_ID)")
+outs.groupBy(_.indvId).toSeq.sortBy(_._1).foreach { case (id, rows) =>
+  println(s"INDV $id -> ${rows.map(o => s"${o.status}").mkString(", ")}")
+}
+println(s"\n✅ TOTAL ROWS: ${outs.size}")
