@@ -1,61 +1,19 @@
-from base64 import b64encode
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.backends import default_backend
+import org.apache.spark.sql.functions._
 
-key_path = "/dbfs/FileStore/keys/rsa_key.p8"     # your PEM path
-passphrase = "YOUR_PASSPHRASE"
-
-with open(key_path, "rb") as f:
-    p_key = serialization.load_pem_private_key(
-        f.read(),
-        password=passphrase.encode(),
-        backend=default_backend(),
-    )
-
-# Convert to unencrypted PKCS#8 DER bytes, then base64
-private_bytes = p_key.private_bytes(
-    encoding=serialization.Encoding.DER,
-    format=serialization.PrivateFormat.PKCS8,
-    encryption_algorithm=serialization.NoEncryption(),
-)
-
-b64 = b64encode(private_bytes).decode("utf-8")
-
-# Save the base64 to DBFS as a small text file
-with open("/dbfs/FileStore/keys/sf_pk_base64.txt", "w") as f:
-    f.write(b64)
-
-print("Saved to /dbfs/FileStore/keys/sf_pk_base64.txt")
-
-
-// ==== Scala: read Snowflake (JWT) ====
-
-import scala.collection.JavaConverters._
-
-// 1) Read the base64-encoded PKCS#8 private key we saved from Python
-val pemB64: String = {
-  // head() reads small text files; increase maxBytes if your key were large (it isn't)
-  dbutils.fs.head("dbfs:/FileStore/keys/sf_pk_base64.txt", 1024*1024)
-}
-
-// 2) Snowflake connection options via JWT
-val sfOptions = Map(
-  "sfURL"         -> "uhgdwaas.east-us-2.azure.snowflakecomputing.com",
-  "sfUser"        -> "BEERAVALLI_REDDY@OPTUM.COM",
-  "sfRole"        -> "AZU_SDRP_LUTF_STG_DEVELOPER_ROLE",
-  "sfWarehouse"   -> "LUTF_STG_EVISOR_WH",
-  "sfDatabase"    -> "LUTF_STG_EVISOR_DB",
-  "sfSchema"      -> "ETL",
-  "authenticator" -> "SNOWFLAKE_JWT",
-  "pem_private_key" -> pemB64
-)
-
-// 3) Test query: pull one row to validate the connection
+// ====== STEP 2: Load small batch from Snowflake ======
 val df = spark.read
   .format("snowflake")
   .options(sfOptions)
-  .option("query", "SELECT * FROM ELEMENT_DATA_TABLE_KIS LIMIT 1")
+  .option("query", "SELECT * FROM ELEMENT_DATA_TABLE_KIS LIMIT 10000") // small batch for test
   .load()
 
+// ====== Inspect schema & sample ======
 df.printSchema()
-df.show(false)
+df.select("INDV_ID", "ELEM_NBR", "MEM_NAME").show(20, false)
+
+// ====== STEP 3: Partition by INDV_ID ======
+val grouped = df.groupBy("INDV_ID").count()
+println(s"✅ Total unique INDV_IDs: ${grouped.count()}")
+
+// Show a few partitions
+grouped.orderBy(desc("count")).show(10)
