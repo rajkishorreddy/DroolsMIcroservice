@@ -1,8 +1,5 @@
 %scala
-// =======================================
-// 0. Imports
-// =======================================
-import org.apache.spark.sql.{Row, DataFrame}
+import org.apache.spark.sql.{Row, DataFrame, Dataset, Encoder, Encoders}
 import org.apache.spark.sql.functions._
 import scala.collection.JavaConverters._
 import scala.util.Try
@@ -10,54 +7,59 @@ import scala.util.Try
 // Drools imports
 import org.kie.api.KieServices
 import org.kie.api.builder.{KieBuilder, Message, Results}
-import org.kie.api.io.ResourceType
 import org.kie.internal.io.ResourceFactory
 import org.kie.api.runtime.{StatelessKieSession, ClassObjectFilter}
 
 // Your model classes from the JAR
 import CommonDataObject.{CommonDataModel, CommonDataResultSet}
 
-// =======================================
-// 1. Snowflake options (reuse what already works)
-//    NOTE: we assume sf_pk_base64.txt is already saved in DBFS
-// =======================================
+// Spark implicits for encoders
+import spark.implicits._
+
+// ======================================================
+// 0. Snowflake connection options (same as before)
+//    We assume sf_pk_base64.txt already exists and works
+// ======================================================
 val pemB64: String =
   dbutils.fs.head("dbfs:/FileStore/keys/sf_pk_base64.txt", 1024 * 1024)
 
 val sfOptions = Map(
-  "sfURL"          -> "uhgdwaas.east-us-2.azure.snowflakecomputing.com",
-  "sfUser"         -> "BEERAVALLI_REDDY@OPTUM.COM",
-  "sfRole"         -> "AZU_SDRP_LUTF_STG_DEVELOPER_ROLE",
-  "sfWarehouse"    -> "LUTF_STG_EVISOR_WH",
-  "sfDatabase"     -> "LUTF_STG_EVISOR_DB",
-  "sfSchema"       -> "ETL",
-  "authenticator"  -> "SNOWFLAKE_JWT",
-  "pem_private_key"-> pemB64
+  "sfURL"           -> "uhgdwaas.east-us-2.azure.snowflakecomputing.com",
+  "sfUser"          -> "BEERAVALLI_REDDY@OPTUM.COM",
+  "sfRole"          -> "AZU_SDRP_LUTF_STG_DEVELOPER_ROLE",
+  "sfWarehouse"     -> "LUTF_STG_EVISOR_WH",
+  "sfDatabase"      -> "LUTF_STG_EVISOR_DB",
+  "sfSchema"        -> "ETL",
+  "authenticator"   -> "SNOWFLAKE_JWT",
+  "pem_private_key" -> pemB64
 )
 
-// =======================================
-// 2. Read a manageable slice while we wire types
-//    (we'll scale later, this is just dev mode)
-// =======================================
-val df: DataFrame =
+// ======================================================
+// 1. Pull the source data from Snowflake
+//    DEV MODE: LIMIT 1000
+//    PROD MODE: remove the LIMIT
+// ======================================================
+val srcDF: DataFrame =
   spark.read
     .format("snowflake")
     .options(sfOptions)
-    .option("query",
+    .option(
+      "query",
       """SELECT *
          FROM ELEMENT_DATA_TABLE_KIS
-         LIMIT 1000"""
+         LIMIT 1000""" // <-- remove this LIMIT when you're ready for 8.5B (after QA)
     )
     .load()
 
-println(s"✅ Loaded rows: ${df.count()}")
+println(s"✅ Loaded rows from Snowflake: ${srcDF.count()}")
 
-// =======================================
-// 3. Strongly-typed getters
-//    These helpers pull values from Spark Row and give us proper
-//    java.lang.* types that match CommonDataModel's constructor.
-// =======================================
+// We'll work with a typed Dataset[Row] downstream
+val srcDS: Dataset[Row] = srcDF.as[Row]
 
+// ======================================================
+// 2. Strongly-typed getters: convert Spark Row -> Java types
+//    These match your CommonDataModel constructor expectations
+// ======================================================
 def gInt(r: Row, name: String): java.lang.Integer = {
   val v = r.getAs[Any](name)
   v match {
@@ -121,10 +123,7 @@ def gStr(r: Row, name: String): String = {
   if (v == null) null else v.toString
 }
 
-/*
- Spark `DateType` will usually come back as `java.sql.Date`.
- We’ll convert to `java.sql.Date`, and allow LocalDate as well.
-*/
+// Spark gives DateType as java.sql.Date normally; also handle LocalDate/String
 def gDate(r: Row, name: String): java.sql.Date = {
   val v = r.getAs[Any](name)
   v match {
@@ -132,58 +131,17 @@ def gDate(r: Row, name: String): java.sql.Date = {
     case d: java.sql.Date           => d
     case d: java.time.LocalDate     => java.sql.Date.valueOf(d)
     case s: String if s.trim.nonEmpty =>
-      // try yyyy-MM-dd
       try { java.sql.Date.valueOf(s.trim) } catch { case _: Throwable => null }
     case _                          => null
   }
 }
 
-// =======================================
-// 4. Build CommonDataModel from a Row
-//    ORDER MATTERS: this MUST match your full constructor exactly
-//    Constructor signature you showed:
-//
-//  public CommonDataModel(
-//      Integer indv_id,
-//      Integer elem_nbr,
-//      Double elem_qty,
-//      Integer age,
-//      String mem_name,
-//      java.sql.Date elem_dt_1,
-//      java.sql.Date elem_dt_2,
-//      String scor_typ_cd,
-//      Float scor_val,
-//      Integer prg_srvc_id,
-//      java.sql.Date trm_dt,
-//      java.sql.Date eff_dt,
-//      String st_abbr_cd,
-//      String optum_seg_id,
-//      java.sql.Date id_run_dt,
-//      Integer outbound_file_id,
-//      String scen_rule_cd,
-//      java.sql.Date dob,
-//      java.sql.Date effective_date,
-//      java.sql.Date end_date,
-//      String med_dx_of_interest,
-//      String scenario_cd,
-//      java.sql.Date next_effective_date,
-//      Integer grace_period,
-//      java.sql.Date min_eff_date,
-//      java.sql.Date max_end_date,
-//      java.sql.Date final_end_date,
-//      String adt_chief_complaint,
-//      String elem_sup,
-//      String continuity,
-//      Float med_cov,
-//      Float rel_iptnt_risk_12_mo_nbr
-//  )
-//
-// We'll grab each column from Snowflake using the getters above.
-// You already saw all the column names in df.printSchema() / df.show().
-// =======================================
-
-def toModel(r: Row): CommonDataObject.CommonDataModel =
-  new CommonDataObject.CommonDataModel(
+// ======================================================
+// 3. Row -> CommonDataModel
+//    MUST match your full constructor order exactly
+// ======================================================
+def rowToModel(r: Row): CommonDataModel =
+  new CommonDataModel(
     gInt(r,"INDV_ID"),
     gInt(r,"ELEM_NBR"),
     gDbl(r,"ELEM_QTY"),
@@ -218,39 +176,62 @@ def toModel(r: Row): CommonDataObject.CommonDataModel =
     gFlt(r,"REL_IPTNT_RISK_12_MO_NBR")
   )
 
-// Small sanity test on one row
-val sampleRow  = df.limit(1).collect()(0)
-val sampleModel = toModel(sampleRow)
-println(s"✅ Built CommonDataModel for INDV_ID = ${sampleModel.getIndv_id()}")
+// helper to turn INDV_ID into a non-null Long key for grouping
+def indvKey(r: Row): Long = {
+  val raw = r.getAs[Any]("INDV_ID")
+  raw match {
+    case null                    => -1L
+    case n: java.lang.Integer    => n.longValue()
+    case n: java.lang.Long       => n.longValue()
+    case n: java.math.BigDecimal => n.longValue()
+    case s: String if s.trim.nonEmpty =>
+      Try(s.trim.toLong).getOrElse(-1L)
+    case _ =>
+      -1L
+  }
+}
 
-// =======================================
-// 5. Build Drools KieSession once from DBFS DRLs
-//    Assumes you already uploaded .drl files to /dbfs/FileStore/rules
-//    (that's what you've been doing)
-// =======================================
+// ======================================================
+// 4. Pre-load DRL text on the DRIVER
+//    We'll broadcast it because executors CANNOT call dbutils.fs
+// ======================================================
+val drlFiles: Seq[(String,String)] =
+  dbutils.fs.ls("dbfs:/FileStore/rules")
+    .filter(_.name.endsWith(".drl"))
+    .map { f =>
+      val body = dbutils.fs.head(f.path)
+      (f.path, body)
+    }
 
-def buildSessionFromFolderVerbose(dirDbfs: String): StatelessKieSession = {
+println(s"✅ Found DRLs: ${drlFiles.map(_._1).mkString(", ")}")
+
+val drlBC = spark.sparkContext.broadcast(drlFiles)
+
+// ======================================================
+// 5. Helper that executors can call to build a Drools session
+//    from those broadcast DRL strings
+// ======================================================
+def makeSessionFromDrls(drls: Seq[(String,String)]): StatelessKieSession = {
   val ks  = KieServices.Factory.get
   val kfs = ks.newKieFileSystem()
 
-  // Load every .drl file from that DBFS folder
-  dbutils.fs.ls(dirDbfs)
-    .filter(_.name.endsWith(".drl"))
-    .foreach { f =>
-      val body = dbutils.fs.head(f.path)
-      kfs.write(
-        ResourceFactory
-          .newByteArrayResource(body.getBytes("UTF-8"))
-          .setSourcePath(f.path)
-      )
-    }
+  drls.foreach { case (path, body) =>
+    kfs.write(
+      ResourceFactory
+        .newByteArrayResource(body.getBytes("UTF-8"))
+        .setSourcePath(path)
+    )
+  }
 
   val kb: KieBuilder = ks.newKieBuilder(kfs).buildAll()
   val res: Results = kb.getResults
   if (res.hasMessages(Message.Level.ERROR)) {
-    println("⛔ DROOLS BUILD ERRORS:")
-    res.getMessages(Message.Level.ERROR).forEach(m => println("  " + m))
-    throw new IllegalStateException("DRL failed to compile")
+    // if something is wrong with DRL we fail fast
+    val msgs = res.getMessages(Message.Level.ERROR)
+      .asScala
+      .map(_.toString)
+      .mkString("\n  ")
+    throw new IllegalStateException(s"Drools compile error:\n  ${msgs}")
   }
 
   ks.newKieContainer(ks.getRepository.getDefaultReleaseId)
@@ -258,89 +239,109 @@ def buildSessionFromFolderVerbose(dirDbfs: String): StatelessKieSession = {
     .newStatelessKieSession()
 }
 
-// Build it once
-val sess: StatelessKieSession =
-  buildSessionFromFolderVerbose("dbfs:/FileStore/rules")
-
-println("✅ Drools session ready")
-
-// =======================================
-// 6. Prepare result map + convert N rows of df -> Seq[CommonDataModel]
-// =======================================
-
-// global results (this matches what you had before)
-val result = new java.util.HashMap[String, Object]()
-sess.setGlobal("result", result)
-
-// take a slice (we'll wire full partition logic after)
-val testFacts: Seq[CommonDataObject.CommonDataModel] =
-  df.limit(1000).collect().map(toModel).toSeq
-
-println(s"✅ testFacts size: ${testFacts.size}")
-
-// helper to safely extract INDV_ID as Scala Int for grouping
-def indvIdOf(m: CommonDataObject.CommonDataModel): Int = {
-  val x = m.getIndv_id()
-  if (x == null) -1 else x.intValue()
-}
-
-// tiny case class to hold rule output per INDV_ID
-case class Out(
-  indvId:    Long,
-  ruleNum:   String,
-  ruleFlag:  Boolean,
-  isActive:  String
+// ======================================================
+// 6. Result row case class (what we'll collect and write out)
+//    Add whatever fields you want from the global "result" map
+// ======================================================
+case class OutRow(
+  INDV_ID: Long,
+  RULE_NUM: String,
+  RULE_FLAG: Boolean,
+  IS_ACTIVE: String
 )
 
-// =======================================
-// 7. Fire rules for a single INDV_ID group
-//    - insert that group's facts
-//    - execute rules
-//    - read from global "result"
-// =======================================
-def fireForOne(facts: Seq[CommonDataObject.CommonDataModel]): Seq[Out] = {
-  // reset results for this INDV_ID batch
-  result.clear()
+// ======================================================
+// 7. Fire rules for ONE MEMBER (one INDV_ID group) on EXECUTOR
+//    - build session locally
+//    - set global result map
+//    - insert all that member's CommonDataModel facts
+//    - run Drools
+//    - read global map -> OutRow
+//
+// NOTE: we keep global HashMap pattern because that's how
+// your DRLs currently communicate results.
+// Later, if you start inserting CommonDataResultSet objects and want
+// to pull them directly, we can extend this.
+// ======================================================
+def runRulesForOneMember(
+  indvId: Long,
+  rowsIter: Iterator[Row],
+  drlTexts: Seq[(String,String)]
+): Iterator[OutRow] = {
 
-  // 1) Insert all CommonDataModel facts
-  val factsJavaList: java.util.List[Object] =
-    facts.map(_.asInstanceOf[Object]).asJava
-  sess.execute(factsJavaList)
+  // build facts for just this INDV_ID
+  val facts: Seq[CommonDataModel] = rowsIter.toSeq.map(rowToModel)
 
-  // 2) Ask Drools for any CommonDataResultSet facts (our "output rows")
-  val emptyInput = new java.util.ArrayList[Object]()
-  sess.execute(
-    emptyInput,
-    new ClassObjectFilter(classOf[CommonDataObject.CommonDataResultSet])
-  )
+  if (facts.isEmpty) {
+    Iterator.empty
+  } else {
+    val sess  = makeSessionFromDrls(drlTexts)
+    val gmap  = new java.util.HashMap[String,Object]()
+    sess.setGlobal("result", gmap)
 
-  // 3) Map global "result" -> Out
-  // NOTE: right now your ResultSet only stores fields like "status".
-  // We're faking ruleNum/ruleFlag/isActive from result map (same logic as earlier).
-  val out: Out = Out(
-    indvId   = Option(facts.head).map(_.getIndv_id()).map(_.toLong).getOrElse(0L),
-    ruleNum  = Option(result.get("ruleNum")).map(_.toString).getOrElse("NA"),
-    ruleFlag = Option(result.get("ruleFlag")).exists(_.toString.equalsIgnoreCase("true")),
-    isActive = Option(result.get("isActive")).map(_.toString).getOrElse("Y")
-  )
+    // insert member facts
+    val javaFacts: java.util.List[Object] =
+      facts.map(_.asInstanceOf[Object]).asJava
+    sess.execute(javaFacts)
 
-  Seq(out)
+    // ask for result facts (and/or let globals populate)
+    val emptyList = new java.util.ArrayList[Object]()
+    sess.execute(
+      emptyList,
+      new ClassObjectFilter(classOf[CommonDataResultSet])
+    )
+
+    // Build OutRow
+    val out = OutRow(
+      INDV_ID   = indvId,
+      RULE_NUM  = Option(gmap.get("ruleNum")).map(_.toString).getOrElse("NA"),
+      RULE_FLAG = Option(gmap.get("ruleFlag"))
+                    .exists(_.toString.equalsIgnoreCase("true")),
+      IS_ACTIVE = Option(gmap.get("isActive")).map(_.toString).getOrElse("Y")
+    )
+
+    Iterator(out)
+  }
 }
 
-// =======================================
-// 8. Group by INDV_ID, run fireForOne on each partition
-// =======================================
-val outs: Seq[Out] =
-  testFacts
-    .groupBy(indvIdOf)
-    .toSeq
-    .flatMap { case (_, factsForOneIndv) => fireForOne(factsForOneIndv) }
+// ======================================================
+// 8. DISTRIBUTED EXECUTION 👇
+//    group by INDV_ID and run Drools per group IN PARALLEL
+//
+//    - repartition on INDV_ID so each member tends to be in one partition
+//    - groupByKey to get KeyValueGroupedDataset[Long, Row]
+//    - flatMapGroups runs once per INDV_ID per partition
+// ======================================================
+val resultsDS: Dataset[OutRow] =
+  srcDS
+    .repartition(col("INDV_ID"))               // good shuffle key
+    .groupByKey(row => indvKey(row))(Encoders.scalaLong)
+    .flatMapGroups { case (indvId, rowsIter) =>
+      // each executor has access to drlBC.value (Seq[(path,body)])
+      runRulesForOneMember(indvId, rowsIter, drlBC.value)
+    }(Encoders.product[OutRow]) // Spark encoder for case class
 
-println(s"\n🚀 Fired groups: ${outs.size}")
-outs.take(20).foreach(o =>
-  println(s"INDV=${o.indvId}, ruleNum=${o.ruleNum}, ruleFlag=${o.ruleFlag}, isActive=${o.isActive}")
-)
+// ======================================================
+// 9. MATERIALIZE RESULTS
+// ======================================================
+val resultsDF = resultsDS
+  .withColumn("AUDIT_CREAT_DT", current_timestamp())
 
-// =======================================
-// done ✅
-// =======================================
+println(s"✅ Final result rows = ${resultsDF.count()}")
+resultsDF.show(20, truncate=false)
+
+// ======================================================
+// 10. (OPTIONAL) WRITE BACK TO SNOWFLAKE
+//     When you're ready, uncomment this block 👇
+// ======================================================
+/*
+resultsDF
+  .write
+  .format("snowflake")
+  .options(sfOptions)
+  .option("dbtable", "STREAMLIT_RESULTS_KIS")   // <-- target table
+  .mode("append")
+  .save()
+
+println("✅ Results written back to Snowflake!")
+*/
