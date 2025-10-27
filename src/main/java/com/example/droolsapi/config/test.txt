@@ -1,28 +1,67 @@
-val grouped: Dataset[Seq[OutRow]] =
-  factsDS
-    .groupByKey(m => safeIndvId(m))(Encoders.scalaLong)
-    .mapGroups { case (indvId, iterModels) =>
-      // DEBUG PRINT INSIDE EXECUTOR
-      println(s"💥 mapGroups firing for INDV_ID=$indvId")
+// DEBUG: driver-side run (no Spark groupByKey), just to prove logic
 
-      val batch = iterModels.toSeq
+// 1. Convert Spark df -> Seq[CommonDataModel] on driver
+val testFactsLocal: Seq[CommonDataObject.CommonDataModel] =
+  srcDF.collect().toSeq.map(toModel)
 
-      println(s"   batch size for $indvId = ${batch.size}")
-      batch.take(5).foreach { f =>
-        println(s"   fact sample -> INDV_ID=${f.getIndv_id()}, ELEM_NBR=${f.getElem_nbr()}, CONTINUITY=${f.getContinuity()}")
-      }
+println(s"[LOCAL DEBUG] total rows from Snowflake for these INDV_IDs = ${testFactsLocal.size}")
 
-      // call our rule executor
-      val outs = runRulesForOneMember(indvId, batch)
+// 2. Group manually by INDV_ID from the model
+val byMember: Map[Long, Seq[CommonDataObject.CommonDataModel]] =
+  testFactsLocal
+    .flatMap { m =>
+      Option(m.getIndv_id()).map(_.longValue()).map(id => (id, m))
+    }
+    .groupBy(_._1)
+    .mapValues(_.map(_._2))
 
-      println(s"   outs.size for $indvId = ${outs.size}")
-      outs
-    }(Encoders.kryo[Seq[OutRow]])
+println(s"[LOCAL DEBUG] num members in this batch = ${byMember.size}")
+println(s"[LOCAL DEBUG] members = ${byMember.keys.mkString(\", \")}")
 
-val allResultsDS =
-  grouped.flatMap(rows => rows)(Encoders.product[OutRow])
+// 3. Re-define a local version of runRulesForOneMember that definitely prints,
+//    and definitely captures CommonDataResultSet inserts using sess.execute return value.
+def runRulesForOneMember_localDebug(
+  indvId: Long,
+  facts: Seq[CommonDataObject.CommonDataModel]
+): Seq[OutRow] = {
 
-println("=== DEBUG final collect ===")
-val debugCollected = allResultsDS.collect()
-println(s"total result rows from rules: ${debugCollected.length}")
-debugCollected.take(20).foreach(println)
+  println(s"💥 Running Drools for INDV_ID=$indvId with ${facts.size} facts")
+
+  val sess: StatelessKieSession = buildSessionFromBundle(ruleBundleBC.value)
+
+  // run Drools and capture returned objects (Drools returns inserted facts)
+  val droolsResultObjects: java.util.List[_] = sess.execute(facts.asJava)
+
+  import scala.collection.JavaConverters._
+  val outs: Seq[OutRow] =
+    droolsResultObjects.asScala.collect {
+      case r: CommonDataObject.CommonDataResultSet =>
+        val ruleNum = Option(r.getStatus()).getOrElse("NA")
+        OutRow(
+          INDV_ID   = indvId,
+          RULE_NUM  = ruleNum,
+          RULE_FLAG = true,
+          IS_ACTIVE = "Y"
+        )
+    }.toSeq
+
+  println(s"   -> Drools produced ${outs.size} result rows for $indvId")
+  outs.foreach(o => println(s"      RESULT: $o"))
+  outs
+}
+
+// 4. Run for each member and flatten
+val allOutRowsLocal: Seq[OutRow] =
+  byMember.toSeq.flatMap { case (id, memberFacts) =>
+    runRulesForOneMember_localDebug(id, memberFacts)
+  }
+
+println(s"[LOCAL DEBUG] TOTAL RESULT ROWS = ${allOutRowsLocal.size}")
+allOutRowsLocal.foreach(println)
+
+// 5. Convert to DataFrame (same schema you'll write to Snowflake)
+val finalLocalDF = spark.createDataFrame(allOutRowsLocal)
+  .withColumn("AUDIT_CREAT_DT", current_timestamp())
+
+println("[LOCAL DEBUG] finalLocalDF preview:")
+finalLocalDF.show(false)
