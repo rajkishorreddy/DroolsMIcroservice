@@ -1,76 +1,9 @@
-// DEBUG: driver-side run (no Spark groupByKey), just to prove logic
-
-// 1. Convert Spark df -> Seq[CommonDataModel] on driver
-val testFactsLocal: Seq[CommonDataObject.CommonDataModel] =
-  srcDF.collect().toSeq.map(toModel)
-
-println(s"[LOCAL DEBUG] total rows from Snowflake for these INDV_IDs = ${testFactsLocal.size}")
-
-// 2. Group manually by INDV_ID from the model
-val byMember: Map[Long, Seq[CommonDataObject.CommonDataModel]] =
-  testFactsLocal
-    .flatMap { m =>
-      Option(m.getIndv_id()).map(_.longValue()).map(id => (id, m))
-    }
-    .groupBy(_._1)
-    .mapValues(_.map(_._2))
-
-println(s"[LOCAL DEBUG] num members in this batch = ${byMember.size}")
-println(s"[LOCAL DEBUG] members = ${byMember.keys.mkString(\", \")}")
-
-// 3. Re-define a local version of runRulesForOneMember that definitely prints,
-//    and definitely captures CommonDataResultSet inserts using sess.execute return value.
-def runRulesForOneMember_localDebug(
-  indvId: Long,
-  facts: Seq[CommonDataObject.CommonDataModel]
-): Seq[OutRow] = {
-
-  println(s"💥 Running Drools for INDV_ID=$indvId with ${facts.size} facts")
-
-  val sess: StatelessKieSession = buildSessionFromBundle(ruleBundleBC.value)
-
-  // run Drools and capture returned objects (Drools returns inserted facts)
-  val droolsResultObjects: java.util.List[_] = sess.execute(facts.asJava)
-
-  import scala.collection.JavaConverters._
-  val outs: Seq[OutRow] =
-    droolsResultObjects.asScala.collect {
-      case r: CommonDataObject.CommonDataResultSet =>
-        val ruleNum = Option(r.getStatus()).getOrElse("NA")
-        OutRow(
-          INDV_ID   = indvId,
-          RULE_NUM  = ruleNum,
-          RULE_FLAG = true,
-          IS_ACTIVE = "Y"
-        )
-    }.toSeq
-
-  println(s"   -> Drools produced ${outs.size} result rows for $indvId")
-  outs.foreach(o => println(s"      RESULT: $o"))
-  outs
-}
-
-// 4. Run for each member and flatten
-val allOutRowsLocal: Seq[OutRow] =
-  byMember.toSeq.flatMap { case (id, memberFacts) =>
-    runRulesForOneMember_localDebug(id, memberFacts)
-  }
-
-println(s"[LOCAL DEBUG] TOTAL RESULT ROWS = ${allOutRowsLocal.size}")
-allOutRowsLocal.foreach(println)
-
-// 5. Convert to DataFrame (same schema you'll write to Snowflake)
-val finalLocalDF = spark.createDataFrame(allOutRowsLocal)
-  .withColumn("AUDIT_CREAT_DT", current_timestamp())
-
-println("[LOCAL DEBUG] finalLocalDF preview:")
-finalLocalDF.show(false)
-
-
-import java.util.{ArrayList, Collection}
 import scala.collection.JavaConverters._
+import java.util.{ArrayList, Collection}
 
-val factObjects: Collection[AnyRef] = new ArrayList[AnyRef]()
+// build the list of facts
+val factObjects: java.util.ArrayList[AnyRef] = new java.util.ArrayList[AnyRef]()
 facts.foreach(f => factObjects.add(f.asInstanceOf[AnyRef]))
 
-val droolsResultObjects: java.util.List[_] = sess.execute(factObjects)
+// ✅ Drools expects an Object, so cast to AnyRef when executing
+val droolsResultObjects = sess.execute(factObjects.asInstanceOf[AnyRef])
