@@ -65,3 +65,12 @@ val finalLocalDF = spark.createDataFrame(allOutRowsLocal)
 
 println("[LOCAL DEBUG] finalLocalDF preview:")
 finalLocalDF.show(false)
+
+
+import java.util.{ArrayList, Collection}
+import scala.collection.JavaConverters._
+
+val factObjects: Collection[AnyRef] = new ArrayList[AnyRef]()
+facts.foreach(f => factObjects.add(f.asInstanceOf[AnyRef]))
+
+val droolsResultObjects: java.util.List[_] = sess.execute(factObjects)
