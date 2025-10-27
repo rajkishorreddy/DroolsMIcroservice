@@ -1,16 +1,24 @@
-println(s"\n===== DEBUG MEMBER $indvId =====")
-println(s"fact count for this member: ${facts.size}")
-facts.foreach { f =>
+println("=== DEBUG factsDS count ===")
+println(factsDS.count())
+
+println("=== DEBUG first few CommonDataModel objects ===")
+factsDS.take(10).foreach { m =>
   println(
     s"""
-    |INDV_ID=${f.getIndv_id()}
-    |ELEM_NBR=${f.getElem_nbr()}
-    |MEM_NAME=${f.getMem_name()}
-    |CONTINUITY=${f.getContinuity()}
-    |AGE_IN_DECIMALS=${f.getAgeInDecimals()}
-    |adjustedFinalDate=${f.getAdjustedFinalDate()}
-    |continuousPeriod=${f.getContinuousPeriod()}
+    |INDV_ID            = ${m.getIndv_id()}
+    |ELEM_NBR           = ${m.getElem_nbr()}
+    |MEM_NAME           = ${m.getMem_name()}
+    |CONTINUITY         = ${m.getContinuity()}
+    |AGE_IN_DECIMALS    = ${Try(m.getAgeInDecimals()).getOrElse(null)}
+    |ADJ_FINAL_DATE     = ${Try(m.getAdjustedFinalDate()).getOrElse(null)}
+    |CONTINUOUS_PERIOD  = ${Try(m.getContinuousPeriod()).getOrElse(null)}
     |""".stripMargin
   )
 }
-println("=================================\n")
+
+
+println("=== DEBUG distinct keys (safeIndvId) ===")
+factsDS
+  .map(m => safeIndvId(m))(Encoders.scalaLong)
+  .distinct()
+  .show(100, truncate=false)
