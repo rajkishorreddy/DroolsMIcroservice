@@ -1,33 +1,139 @@
-// ==========================================================
-// 3️⃣ FIXED DEBUG EXECUTION BLOCK (StatelessKieSession + GetObjects)
-// ==========================================================
+// ================================================================
+//  DROOLS RULE EXECUTION (DEBUG LOCAL RUN) — FINAL TEST SCRIPT
+// ================================================================
+
+%scala
+import org.apache.spark.sql.{Row, DataFrame, Dataset, Encoders}
+import org.apache.spark.sql.functions._
 import scala.collection.JavaConverters._
-import java.util.{ArrayList, Collection}
+import org.kie.api.KieServices
+import org.kie.api.builder.{KieBuilder, Message}
+import org.kie.api.io.ResourceType
+import org.kie.api.runtime.StatelessKieSession
+import org.kie.internal.io.ResourceFactory
 import org.kie.api.command.Command
 import org.kie.internal.command.CommandFactory
+import java.util.{ArrayList, Collection}
+
+// ================================================================
+// 1. SNOWFLAKE CONNECTION
+// ================================================================
+val pemB64: String = dbutils.fs.head("dbfs:/FileStore/keys/sf_pk_base64.txt", 1024*1024)
+val sfOptions = Map(
+  "sfURL" -> "uhgdwaas.east-us-2.azure.snowflakecomputing.com",
+  "sfUser" -> "BEERAVALLI_REDDY@OPTUM.COM",
+  "sfRole" -> "AZU_SDRP_LUTF_STG_DEVELOPER_ROLE",
+  "sfWarehouse" -> "LUTF_STG_EVISOR_WH",
+  "sfDatabase" -> "LUTF_STG_EVISOR_DB",
+  "sfSchema" -> "ETL",
+  "authenticator" -> "SNOWFLAKE_JWT",
+  "pem_private_key" -> pemB64
+)
+
+// ================================================================
+// 2. READ SAMPLE DATA (TWO INDV_IDs)
+// ================================================================
+val srcDF: DataFrame = spark.read
+  .format("snowflake")
+  .options(sfOptions)
+  .option("query",
+    """SELECT * FROM ELEMENT_DATA_TABLE_KIS
+       WHERE INDV_ID IN (60618623, 60618754)"""
+  )
+  .load()
+
+println(s"✅ Loaded rows from Snowflake: ${srcDF.count()}")
+
+// ================================================================
+// 3. CONVERT ROWS → CommonDataModel
+// ================================================================
+def gInt(r: Row, name: String): java.lang.Integer = Option(r.getAs[Any](name)) match {
+  case Some(n: java.lang.Integer) => n
+  case Some(n: java.lang.Long) => n.toInt
+  case Some(s: String) if s.trim.nonEmpty => s.trim.toInt
+  case _ => null
+}
+def gStr(r: Row, name: String): String = Option(r.getAs[Any](name)).map(_.toString).orNull
+
+def toModel(r: Row): CommonDataObject.CommonDataModel = new CommonDataObject.CommonDataModel(
+  gInt(r, "INDV_ID"),
+  gInt(r, "ELEM_NBR"),
+  gStr(r, "MEM_NAME"),
+  gStr(r, "SCEN_RULE_CD")
+  // add all other required fields here (trimmed for brevity)
+)
+
+val testFactsLocal = srcDF.collect().toSeq.map(toModel)
+println(s"[LOCAL DEBUG] total rows from Snowflake = ${testFactsLocal.size}")
+
+// ================================================================
+// 4. LOAD RULES FROM DBFS
+// ================================================================
+case class RuleBundle(drlFiles: Seq[(String, String)])
+
+def loadRuleBundle(dir: String): RuleBundle = {
+  val drls = dbutils.fs.ls(dir)
+    .filter(_.name.toLowerCase.endsWith(".drl"))
+    .map(f => {
+      val body = dbutils.fs.head(f.path)
+      (f.path, body)
+    })
+  RuleBundle(drls)
+}
+
+val ruleBundle = loadRuleBundle("dbfs:/FileStore/rules")
+println(s"✅ Loaded ${ruleBundle.drlFiles.size} DRL files from DBFS")
+ruleBundle.drlFiles.foreach { case (p, _) => println(s"  - $p") }
+
+val ruleBundleBC = spark.sparkContext.broadcast(ruleBundle)
+
+// ================================================================
+// 5. BUILD SESSION FROM RULE BUNDLE
+// ================================================================
+def buildSessionFromBundle(rb: RuleBundle): StatelessKieSession = {
+  val ks = KieServices.Factory.get
+  val kfs = ks.newKieFileSystem()
+
+  rb.drlFiles.foreach { case (path, body) =>
+    kfs.write(path, ResourceFactory.newByteArrayResource(body.getBytes("UTF-8")).setResourceType(ResourceType.DRL))
+  }
+
+  val kbuilder = ks.newKieBuilder(kfs).buildAll()
+  val results = kbuilder.getResults
+  if (results.hasMessages(Message.Level.ERROR)) {
+    val errs = results.getMessages(Message.Level.ERROR).asScala.mkString("\n")
+    throw new IllegalStateException(s"DROOLS BUILD ERRORS:\n$errs")
+  }
+
+  val kbase = ks.newKieContainer(ks.getRepository.getDefaultReleaseId).getKieBase
+  val sess = kbase.newStatelessKieSession()
+  sess
+}
+
+// ================================================================
+// 6. RUN RULES FOR ONE MEMBER (FIXED VERSION)
+// ================================================================
+case class OutRow(INDV_ID: Long, RULE_NUM: String, RULE_FLAG: Boolean, IS_ACTIVE: String)
 
 def runRulesForOneMember_localDebug(indvId: Long, facts: Seq[CommonDataObject.CommonDataModel]): Seq[OutRow] = {
   println(s"💥 Running Drools for INDV_ID=$indvId with ${facts.size} facts")
 
   val sess: org.kie.api.runtime.StatelessKieSession = buildSessionFromBundle(ruleBundleBC.value)
 
-  // === build fact list
+  // build fact list
   val factObjects: java.util.ArrayList[AnyRef] = new java.util.ArrayList[AnyRef]()
   facts.foreach(f => factObjects.add(f.asInstanceOf[AnyRef]))
 
-  // === batch commands (insert + fire + get objects)
+  // batch commands (insert + fire + get objects)
   val insertCmd = CommandFactory.newInsertElements(factObjects)
   val fireCmd = CommandFactory.newFireAllRules()
-  val getObjectsCmd = CommandFactory.newGetObjects() // retrieves all inserted facts
+  val getObjectsCmd = CommandFactory.newGetObjects()
   val batchCmds = new java.util.ArrayList[Command[_]]()
   batchCmds.add(insertCmd)
   batchCmds.add(fireCmd)
   batchCmds.add(getObjectsCmd)
 
-  // === execute Drools session
   val execResults = sess.execute(CommandFactory.newBatchExecution(batchCmds))
-
-  // === extract facts (like CommonDataResultSet)
   val droolsResultObjects = execResults.getValue("objects").asInstanceOf[java.util.List[AnyRef]]
 
   val outs: Seq[OutRow] = droolsResultObjects.asScala.collect {
@@ -45,3 +151,40 @@ def runRulesForOneMember_localDebug(indvId: Long, facts: Seq[CommonDataObject.Co
   outs.foreach(o => println(s"RESULT: $o"))
   outs
 }
+
+// ================================================================
+// 7. RUN FOR ALL INDV_IDs & COLLECT RESULTS
+// ================================================================
+val byMember = testFactsLocal
+  .flatMap(m => Option(m.getIndv_id()).map(_.longValue()).map(id => (id, m)))
+  .groupBy(_._1)
+  .mapValues(_.map(_._2))
+
+println(s"[LOCAL DEBUG] members count = ${byMember.size}")
+
+val allOutRowsLocal: Seq[OutRow] =
+  byMember.toSeq.flatMap { case (id, memberFacts) => runRulesForOneMember_localDebug(id, memberFacts) }
+
+println(s"[LOCAL DEBUG] TOTAL RESULT ROWS = ${allOutRowsLocal.size}")
+allOutRowsLocal.foreach(println)
+
+// ================================================================
+// 8. WRITE BACK TO DATAFRAME
+// ================================================================
+val finalLocalDF = spark.createDataFrame(allOutRowsLocal)
+  .withColumn("AUDIT_CREAT_DT", current_timestamp())
+
+println(s"[LOCAL DEBUG] finalLocalDF preview:")
+finalLocalDF.show(false)
+
+// Uncomment below if you want to write back to Snowflake
+/*
+finalLocalDF
+  .write
+  .format("snowflake")
+  .options(sfOptions)
+  .option("dbtable", "STREAMLIT_RESULTS_KIS")
+  .mode("append")
+  .save()
+println("✅ Results written to Snowflake!")
+*/
