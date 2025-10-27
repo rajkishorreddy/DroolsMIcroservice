@@ -1,24 +1,28 @@
-println("=== DEBUG factsDS count ===")
-println(factsDS.count())
+val grouped: Dataset[Seq[OutRow]] =
+  factsDS
+    .groupByKey(m => safeIndvId(m))(Encoders.scalaLong)
+    .mapGroups { case (indvId, iterModels) =>
+      // DEBUG PRINT INSIDE EXECUTOR
+      println(s"💥 mapGroups firing for INDV_ID=$indvId")
 
-println("=== DEBUG first few CommonDataModel objects ===")
-factsDS.take(10).foreach { m =>
-  println(
-    s"""
-    |INDV_ID            = ${m.getIndv_id()}
-    |ELEM_NBR           = ${m.getElem_nbr()}
-    |MEM_NAME           = ${m.getMem_name()}
-    |CONTINUITY         = ${m.getContinuity()}
-    |AGE_IN_DECIMALS    = ${Try(m.getAgeInDecimals()).getOrElse(null)}
-    |ADJ_FINAL_DATE     = ${Try(m.getAdjustedFinalDate()).getOrElse(null)}
-    |CONTINUOUS_PERIOD  = ${Try(m.getContinuousPeriod()).getOrElse(null)}
-    |""".stripMargin
-  )
-}
+      val batch = iterModels.toSeq
 
+      println(s"   batch size for $indvId = ${batch.size}")
+      batch.take(5).foreach { f =>
+        println(s"   fact sample -> INDV_ID=${f.getIndv_id()}, ELEM_NBR=${f.getElem_nbr()}, CONTINUITY=${f.getContinuity()}")
+      }
 
-println("=== DEBUG distinct keys (safeIndvId) ===")
-factsDS
-  .map(m => safeIndvId(m))(Encoders.scalaLong)
-  .distinct()
-  .show(100, truncate=false)
+      // call our rule executor
+      val outs = runRulesForOneMember(indvId, batch)
+
+      println(s"   outs.size for $indvId = ${outs.size}")
+      outs
+    }(Encoders.kryo[Seq[OutRow]])
+
+val allResultsDS =
+  grouped.flatMap(rows => rows)(Encoders.product[OutRow])
+
+println("=== DEBUG final collect ===")
+val debugCollected = allResultsDS.collect()
+println(s"total result rows from rules: ${debugCollected.length}")
+debugCollected.take(20).foreach(println)
