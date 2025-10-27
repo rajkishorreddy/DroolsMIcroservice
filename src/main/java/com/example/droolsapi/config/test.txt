@@ -1,15 +1,24 @@
-// ===== 1. Pull ALL rows for just those 2 members into driver memory =====
-// (srcDF already filtered to WHERE INDV_ID IN (...))
+// ======================================================
+// DRIVER-ONLY LOCAL DEBUG EXECUTION
+// (No Spark groupByKey, no Kryo, no serialization issues)
+// ======================================================
+
+import org.apache.spark.sql.functions._
+import scala.collection.JavaConverters._
+
+// 1. pull filtered Snowflake rows into memory and convert to CommonDataModel
 val testFactsLocal: Seq[CommonDataObject.CommonDataModel] =
   srcDF.collect().toSeq.map(toModel)
 
 println(s"[LOCAL DEBUG] total rows from Snowflake for these INDV_IDs = ${testFactsLocal.size}")
 
-// ===== 2. Group manually by INDV_ID (on driver, no Spark executors) =====
+// 2. group manually by INDV_ID on the driver
 val byMember: Map[Long, Seq[CommonDataObject.CommonDataModel]] =
   testFactsLocal
     .flatMap { m =>
-      Option(m.getIndv_id()).map(_.longValue()).map(id => (id, m))
+      Option(m.getIndv_id())
+        .map(_.longValue())
+        .map(id => (id, m))
     }
     .groupBy(_._1)
     .mapValues(_.map(_._2))
@@ -17,7 +26,7 @@ val byMember: Map[Long, Seq[CommonDataObject.CommonDataModel]] =
 println(s"[LOCAL DEBUG] num members in this batch = ${byMember.size}")
 println(s"[LOCAL DEBUG] members = ${byMember.keys.mkString(",")}")
 
-// ===== 3. Helper to build Drools session, run facts, capture inserts =====
+// 3. output row schema (this matches what we'll eventually write to Snowflake)
 case class OutRow(
   INDV_ID: Long,
   RULE_NUM: String,
@@ -25,69 +34,78 @@ case class OutRow(
   IS_ACTIVE: String
 )
 
+// We'll need buildSessionFromBundle + ruleBundleBC from earlier.
+// Assumes you already ran:
+//   val ruleBundleBC = spark.sparkContext.broadcast(loadRuleBundle("/dbfs/FileStore/rules"))
+//   def buildSessionFromBundle(...): StatelessKieSession = { ... }  (the working one)
+
+
 def runRulesForOneMember_localDebug(
-  indvId: Long,
-  facts: Seq[CommonDataObject.CommonDataModel]
+    indvId: Long,
+    facts: Seq[CommonDataObject.CommonDataModel]
 ): Seq[OutRow] = {
 
-  println(s"🔥 Running Drools for INDV_ID=${indvId} with ${facts.size} facts")
+  println(s"\n🔥 Running Drools for INDV_ID=$indvId with ${facts.size} facts")
 
   // fresh stateless session ON DRIVER
   val sess: org.kie.api.runtime.StatelessKieSession =
     buildSessionFromBundle(ruleBundleBC.value)
 
-  // make a global result map (like before)
+  // set up global "result" HashMap like in your working pipeline
   val resultMap = new java.util.HashMap[String,Object]()
   sess.setGlobal("result", resultMap)
 
-  // convert scala Seq -> java.util.List[Object] for Drools
+  // ---- 3a. first execute: insert member facts + fire rules
   val factObjects = new java.util.ArrayList[Object]()
   facts.foreach(f => factObjects.add(f.asInstanceOf[Object]))
 
-  // 1) insert member facts
+  // this execute just runs the rules; it returns Unit (void)
   sess.execute(factObjects)
 
-  // 2) now query back inserted CommonDataResultSet rows
-  import org.kie.api.runtime.ClassObjectFilter
+  // ---- 3b. second execute WITH filter: pull out any CommonDataResultSet that got inserted
+  // IMPORTANT: give execute() a typed java.util.List[Object] so it picks the overload
   val emptyList = new java.util.ArrayList[Object]()
   val droolsResultObjects: java.util.List[_] =
     sess.execute(
       emptyList,
-      new ClassObjectFilter(classOf[CommonDataObject.CommonDataResultSet])
+      new org.kie.api.runtime.ClassObjectFilter(
+        classOf[CommonDataObject.CommonDataResultSet]
+      )
     )
 
-  println(s"    🔎 Drools returned ${droolsResultObjects.size()} CommonDataResultSet rows")
+  println(s"    🔎 Drools returned ${droolsResultObjects.size()} inserted CommonDataResultSet rows")
 
-  // 3) map those inserts -> OutRow
-  import scala.collection.JavaConverters._
-  val outs: Seq[OutRow] = droolsResultObjects.asScala.toSeq.collect {
-    case r: CommonDataObject.CommonDataResultSet =>
-      val ruleNum = Option(r.getStatus()).getOrElse("NA")
-      OutRow(
-        INDV_ID   = indvId,
-        RULE_NUM  = ruleNum,
-        RULE_FLAG = true,
-        IS_ACTIVE = "Y"
-      )
-  }
+  // ---- 3c. map those result beans -> OutRow rows
+  val outs: Seq[OutRow] =
+    droolsResultObjects.asScala.toSeq.collect {
+      case r: CommonDataObject.CommonDataResultSet =>
+        val ruleNum: String = Option(r.getStatus()).getOrElse("NA")
+        // RULE_FLAG is true if we saw any hit; IS_ACTIVE = "Y" for now
+        OutRow(
+          INDV_ID   = indvId,
+          RULE_NUM  = ruleNum,
+          RULE_FLAG = true,
+          IS_ACTIVE = "Y"
+        )
+    }
 
-  println(s"    ✅ outs for ${indvId} => ${outs.mkString(",")}")
+  println(s"    ✅ outs for $indvId => ${outs.mkString(",")}")
   outs
 }
 
-// ===== 4. Run Drools per INDV_ID locally and flatten =====
+// 4. run for each member INDV_ID locally (still on driver)
 val allOutRowsLocal: Seq[OutRow] =
   byMember.toSeq.flatMap { case (id, memberFacts) =>
     runRulesForOneMember_localDebug(id, memberFacts)
   }
 
-println(s"[LOCAL DEBUG] TOTAL RESULT ROWS = ${allOutRowsLocal.size}")
+println(s"\n[LOCAL DEBUG] TOTAL RESULT ROWS = ${allOutRowsLocal.size}")
 allOutRowsLocal.foreach(r => println(s"RESULT => $r"))
 
-// ===== 5. Turn into DF with AUDIT_CREATE_DT just like final pipeline =====
+// 5. build final DF (same schema you plan to write to Snowflake, plus AUDIT_CREAT_DT)
 val finalLocalDF =
   spark.createDataFrame(allOutRowsLocal)
     .withColumn("AUDIT_CREAT_DT", current_timestamp())
 
-println("[LOCAL DEBUG] finalLocalDF preview:")
+println("\n[LOCAL DEBUG] finalLocalDF preview:")
 finalLocalDF.show(false)
