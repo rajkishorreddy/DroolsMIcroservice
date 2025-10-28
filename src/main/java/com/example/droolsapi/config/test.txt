@@ -1,7 +1,4 @@
-// =========================================================
-// 🧪 Standalone Drools Rule Test in Databricks
-// =========================================================
-
+import java.sql.Date
 import org.kie.api.KieServices
 import org.kie.api.builder.Message
 import org.kie.api.io.ResourceType
@@ -9,100 +6,67 @@ import org.kie.internal.io.ResourceFactory
 import org.kie.api.runtime.StatelessKieSession
 import org.kie.internal.command.CommandFactory
 import scala.collection.JavaConverters._
-
-// Import your CommonDataObject classes
 import CommonDataObject._
 
-// =========================================================
-// 1️⃣ Load DRL file(s) from DBFS
-// =========================================================
-val rulePaths = Seq(
-  "dbfs:/FileStore/rules/AdolescentImmuneRule.drl"  // change path if needed
-)
-
+// === Load DRL ===
+val rulePath = "dbfs:/FileStore/rules/AdolescentImmuneRule.drl"
 val ks = KieServices.Factory.get
 val kfs = ks.newKieFileSystem()
-
-rulePaths.foreach { path =>
-  val body = dbutils.fs.head(path)
-  kfs.write(path, ResourceFactory.newByteArrayResource(body.getBytes("UTF-8")).setResourceType(ResourceType.DRL))
-}
-
+val body = dbutils.fs.head(rulePath)
+kfs.write(rulePath, ResourceFactory.newByteArrayResource(body.getBytes("UTF-8")).setResourceType(ResourceType.DRL))
 val kbuilder = ks.newKieBuilder(kfs).buildAll()
-val results = kbuilder.getResults
-if (results.hasMessages(Message.Level.ERROR)) {
-  throw new IllegalStateException("🔥 Drools build error:\n" + results.getMessages.asScala.mkString("\n"))
-}
-
+if (kbuilder.getResults.hasMessages(Message.Level.ERROR))
+  throw new RuntimeException(kbuilder.getResults.getMessages.asScala.mkString("\n"))
 val kbase = ks.newKieContainer(ks.getRepository.getDefaultReleaseId).getKieBase
-val sess: StatelessKieSession = kbase.newStatelessKieSession()
-
+val sess = kbase.newStatelessKieSession()
 println("✅ DRL loaded successfully\n")
 
-// =========================================================
-// 2️⃣ Build guaranteed test facts to trigger AdolescentImmuneRule
-// =========================================================
-val testFacts = Seq(
-  {
-    val m = new CommonDataModel()
-    m.setIndv_id(99999)
-    m.setElem_nbr(3327)
-    m.setMem_name("INDV_ELEMENTS_ATTR_EG")
-    m.setAgeInDecimals(true)
-    m.setAdjustedFinalDate(400)
-    m.setContinuity("365D_Continuous")
-    m.setContinuousPeriod(400)
-    m
-  },
-  {
-    val m = new CommonDataModel()
-    m.setIndv_id(99999)
-    m.setElem_nbr(9999)
-    m.setMem_name("RANDOM_ELEM")
-    m.setAgeInDecimals(true)
-    m.setAdjustedFinalDate(100)
-    m.setContinuity("365D_Continuous")
-    m.setContinuousPeriod(100)
-    m
-  }
-)
+// === Build test facts ===
+val indv1 = 12345: java.lang.Integer
+def factSetForAdolescent(indv: java.lang.Integer): Seq[CommonDataModel] = {
+  val a = new CommonDataModel()
+  a.setIndv_id(indv)
+  a.setDob(Date.valueOf("2013-08-15"))
+  a.setMin_eff_date(Date.valueOf("2023-01-01"))
+  a.setFinal_end_date(Date.valueOf("2024-12-31"))
+  a.setGrace_period(400: java.lang.Integer)
 
+  val b = new CommonDataModel()
+  b.setIndv_id(indv)
+  b.setContinuity("365D_Continuous")
+  b.setAdjustedFinalDate(400: java.lang.Integer)      // ✅ added
+  b.setContinuousPeriod(400: java.lang.Integer)       // ✅ added
+
+  val c = new CommonDataModel()
+  c.setIndv_id(indv)
+  c.setElem_nbr(3327: java.lang.Integer)
+  c.setMem_name("INDV_ELEMENTS_ATTR_EG")
+  c.setContinuity("365D_Continuous")
+
+  Seq(a,b,c)
+}
+
+val testFacts = factSetForAdolescent(indv1)
 println(s"🧩 Created ${testFacts.size} test facts")
 
-// =========================================================
-// 3️⃣ Run rules using BatchExecution
-// =========================================================
+// === Execute Drools ===
 val factObjects = new java.util.ArrayList[AnyRef]()
 testFacts.foreach(f => factObjects.add(f.asInstanceOf[AnyRef]))
 
-val insertCmd     = CommandFactory.newInsertElements(factObjects)
-val fireCmd       = CommandFactory.newFireAllRules()
-val getObjectsCmd = CommandFactory.newGetObjects("objects")
-
+val insertCmd = CommandFactory.newInsertElements(factObjects)
+val fireCmd   = CommandFactory.newFireAllRules()
+val getCmd    = CommandFactory.newGetObjects("objects")
 val batchCmds = new java.util.ArrayList[org.kie.api.command.Command[_]]()
-batchCmds.add(insertCmd)
-batchCmds.add(fireCmd)
-batchCmds.add(getObjectsCmd)
+batchCmds.add(insertCmd); batchCmds.add(fireCmd); batchCmds.add(getCmd)
 
 val execResults = sess.execute(CommandFactory.newBatchExecution(batchCmds))
-
-// =========================================================
-// 4️⃣ Inspect results
-// =========================================================
 val allObjs = execResults.getValue("objects").asInstanceOf[java.util.List[AnyRef]]
-
-if (allObjs == null) {
-  println("⚠️ No objects returned — rule might not have fired.")
-} else {
-  println(s"🚀 Working memory contains ${allObjs.size()} objects after firing rules")
-}
+if (allObjs == null) println("⚠️ No objects returned — rule might not have fired.")
+else println(s"🚀 Working memory contains ${allObjs.size()} objects after firing rules")
 
 val resultSets = Option(allObjs)
   .map(_.asScala.collect { case r: CommonDataResultSet => r }.toSeq)
   .getOrElse(Seq.empty)
 
 println(s"✨ Inserted ${resultSets.size} CommonDataResultSet objects")
-
-resultSets.foreach { r =>
-  println(s"✅ RULE FIRED → STATUS = ${r.getStatus}")
-}
+resultSets.foreach(r => println(s"✅ RULE FIRED → STATUS = ${r.getStatus}"))
