@@ -1,20 +1,19 @@
-// Create (INDV_ID, Row) pairs — Rows are serializable
-val factsByIndvRDD = srcDF.rdd.map { r =>
-  val indvId: Long = Option(r.getAs[Any]("INDV_ID")) match {
-    case Some(n: java.lang.Long) => n
-    case Some(n: java.lang.Integer) => n.toLong
+val indvId: Long = try {
+  val raw = r.getAs[Any]("INDV_ID")
+  raw match {
+    case null => -1L
+    case n: java.lang.Long => n
+    case n: java.lang.Integer => n.toLong
+    case n: java.math.BigDecimal => n.longValue()
+    case s: String if s.trim.nonEmpty => s.trim.toLong
     case _ => -1L
   }
-  (indvId, r)
+} catch {
+  case _: Throwable => -1L
 }
 
 
 
-
-val resultsPairRDD = factsByIndvRDD
-  .groupByKey()
-  .flatMap { case (indvId, rowIter) =>
-    // reconstruct models locally — no serialization issue
-    val factSeq = rowIter.toSeq.map(toModel)
-    fireRulesForIndv(kbaseBc.value, indvId, factSeq)
-  }
+factsByIndvRDD.take(5).foreach { case (id, _) =>
+  println(s"✅ INDV_ID parsed correctly: $id")
+}
