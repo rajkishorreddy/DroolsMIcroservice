@@ -1,22 +1,20 @@
-// build the KieBase once on the driver
-val kbase = buildKieBaseFromDbfs("dbfs:/FileStore/rules")
-
-// broadcast the KieBase to executors so each task can build sessions
-val kbaseBc = spark.sparkContext.broadcast(kbase)
-
-// group by INDV_ID on executors, run Drools per INDV_ID
-val resultsPairRDD = factsByIndvRDD
-  .groupByKey() // RDD[(Long, Iterable[CommonDataModel])]
-  .flatMap { case (indvId, factIter) =>
-    val factSeq = factIter.toSeq
-    // use the SAME helper you already have
-    fireRulesForIndv(kbaseBc.value, indvId, factSeq)
-    // fireRulesForIndv returns Seq[(Long, String)]
+// Create (INDV_ID, Row) pairs — Rows are serializable
+val factsByIndvRDD = srcDF.rdd.map { r =>
+  val indvId: Long = Option(r.getAs[Any]("INDV_ID")) match {
+    case Some(n: java.lang.Long) => n
+    case Some(n: java.lang.Integer) => n.toLong
+    case _ => -1L
   }
+  (indvId, r)
+}
 
-// convert the RDD[(Long, String)] -> DataFrame
-import spark.implicits._
-val resultsDF = resultsPairRDD.toDF("INDV_ID", "RULE_STATUS")
 
-println("✅ Final results per INDV_ID:")
-resultsDF.show(truncate=false)
+
+
+val resultsPairRDD = factsByIndvRDD
+  .groupByKey()
+  .flatMap { case (indvId, rowIter) =>
+    // reconstruct models locally — no serialization issue
+    val factSeq = rowIter.toSeq.map(toModel)
+    fireRulesForIndv(kbaseBc.value, indvId, factSeq)
+  }
