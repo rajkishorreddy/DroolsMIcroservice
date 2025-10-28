@@ -1,20 +1,22 @@
-// group by INDV_ID across the cluster and run fireRulesForIndv per group
-val resultsDS = factsDS
-  .groupByKey(f => Option(f.getIndv_id).map(_.toLong).getOrElse(-1L))
-  .mapGroups { case (indvId, iter) =>
-    // iter is all CommonDataModel for this INDV_ID (on that executor)
-    val factSeq = iter.toSeq
+// build the KieBase once on the driver
+val kbase = buildKieBaseFromDbfs("dbfs:/FileStore/rules")
 
-    // run rules for just this INDV_ID using the SAME helper you already have
-    val hits: Seq[(Long, String)] = fireRulesForIndv(kbase, indvId, factSeq)
+// broadcast the KieBase to executors so each task can build sessions
+val kbaseBc = spark.sparkContext.broadcast(kbase)
 
-    // return those hits
-    hits
+// group by INDV_ID on executors, run Drools per INDV_ID
+val resultsPairRDD = factsByIndvRDD
+  .groupByKey() // RDD[(Long, Iterable[CommonDataModel])]
+  .flatMap { case (indvId, factIter) =>
+    val factSeq = factIter.toSeq
+    // use the SAME helper you already have
+    fireRulesForIndv(kbaseBc.value, indvId, factSeq)
+    // fireRulesForIndv returns Seq[(Long, String)]
   }
-  // mapGroups returns Seq[(Long,String)], so flatten that
-  .flatMap(identity)    // Dataset[(Long, String)]
 
+// convert the RDD[(Long, String)] -> DataFrame
 import spark.implicits._
-val resultsDF = resultsDS.toDF("INDV_ID", "RULE_STATUS")
+val resultsDF = resultsPairRDD.toDF("INDV_ID", "RULE_STATUS")
 
+println("✅ Final results per INDV_ID:")
 resultsDF.show(truncate=false)
