@@ -1,210 +1,430 @@
 %scala
-import org.kie.api.KieServices
-import org.kie.api.builder.{KieBuilder, Message, Results}
-import org.kie.internal.io.ResourceFactory
-import org.kie.api.runtime.KieSession
-import org.kie.api.runtime.ClassObjectFilter
-import org.kie.api.KieBase // ✅ correct package for KieBase
-import java.nio.charset.StandardCharsets
+
+// =====================================================
+// 0. Imports
+// =====================================================
+import org.apache.spark.sql.{Row, DataFrame}
+import org.apache.spark.sql.functions._
+import scala.util.Try
 import scala.collection.JavaConverters._
-import java.sql.Date
-import CommonDataObject.{CommonDataModel, CommonDataResultSet}
 
-// ---------- Build KieBase once ----------
-def buildKieBaseFromFolder(dirDbfs: String): KieBase = {
-  val ks  = KieServices.Factory.get
+import org.kie.api.KieServices
+import org.kie.api.builder.{KieBuilder, Message}
+import org.kie.api.io.ResourceType
+import org.kie.api.runtime.StatelessKieSession
+import org.kie.internal.io.ResourceFactory
+import org.kie.api.command.Command
+import org.kie.internal.command.CommandFactory
+
+// =====================================================
+// 1. Snowflake connection (use your working values)
+// =====================================================
+val pemB64: String =
+  dbutils.fs.head("dbfs:/FileStore/keys/sf_pk_base64.txt", 1024*1024)
+
+val sfOptions = Map(
+  "sfURL"          -> "*",
+  "sfUser"         -> "*",
+  "sfRole"         -> "*",
+  "sfWarehouse"    -> "*",
+  "sfDatabase"     -> "*",
+  "sfSchema"       -> "*",
+  "authenticator"  -> "*",
+  "pem_private_key"-> pemB64
+)
+
+// =====================================================
+// 2. Pick ONE INDV_ID to test
+// =====================================================
+val targetIndvId: Long = 1954683399L  // <-- change this to whichever member you want
+
+val srcDF: DataFrame =
+  spark.read
+    .format("snowflake")
+    .options(sfOptions)
+    .option(
+      "query",
+      s"""
+         |SELECT *
+         |FROM ELEMENT_DATA_TABLE_KIS
+         |WHERE INDV_ID = $targetIndvId
+       """.stripMargin
+    )
+    .load()
+
+println(s"✅ Loaded ${srcDF.count()} rows for INDV_ID=$targetIndvId")
+
+// srcDF.show(false)
+
+
+// =====================================================
+// 3. Helpers to pull typed values from Row for CommonDataModel
+// =====================================================
+// Integer
+def gInt(r: Row, name: String): java.lang.Integer = {
+  val v = r.getAs[Any](name)
+  v match {
+    case null                          => null
+    case n: java.lang.Integer          => n
+    case n: java.lang.Long             => java.lang.Integer.valueOf(n.intValue)
+    case n: java.lang.Short            => java.lang.Integer.valueOf(n.intValue)
+    case n: java.lang.Byte             => java.lang.Integer.valueOf(n.intValue)
+    case n: java.math.BigDecimal       => java.lang.Integer.valueOf(n.intValue)
+    case s: String if s.trim.nonEmpty  =>
+      java.lang.Integer.valueOf(s.trim.toInt)
+    case _                             => null
+  }
+}
+
+// Long
+def gLong(r: Row, name: String): java.lang.Long = {
+  val v = r.getAs[Any](name)
+  v match {
+    case null                          => null
+    case n: java.lang.Long             => n
+    case n: java.lang.Integer          => java.lang.Long.valueOf(n.longValue)
+    case n: java.math.BigDecimal       => java.lang.Long.valueOf(n.longValue)
+    case s: String if s.trim.nonEmpty  =>
+      java.lang.Long.valueOf(s.trim.toLong)
+    case _                             => null
+  }
+}
+
+// Double
+def gDbl(r: Row, name: String): java.lang.Double = {
+  val v = r.getAs[Any](name)
+  v match {
+    case null                          => null
+    case n: java.lang.Double           => n
+    case n: java.lang.Float            => java.lang.Double.valueOf(n.toDouble)
+    case n: java.math.BigDecimal       => java.lang.Double.valueOf(n.doubleValue)
+    case n: java.lang.Long             => java.lang.Double.valueOf(n.toDouble)
+    case n: java.lang.Integer          => java.lang.Double.valueOf(n.toDouble)
+    case s: String if s.trim.nonEmpty  =>
+      java.lang.Double.valueOf(s.trim.toDouble)
+    case _                             => null
+  }
+}
+
+// Float
+def gFlt(r: Row, name: String): java.lang.Float = {
+  val v = r.getAs[Any](name)
+  v match {
+    case null                          => null
+    case n: java.lang.Float            => n
+    case n: java.lang.Double           => java.lang.Float.valueOf(n.toFloat)
+    case n: java.math.BigDecimal       => java.lang.Float.valueOf(n.floatValue)
+    case n: java.lang.Long             => java.lang.Float.valueOf(n.toFloat)
+    case n: java.lang.Integer          => java.lang.Float.valueOf(n.toFloat)
+    case s: String if s.trim.nonEmpty  =>
+      java.lang.Float.valueOf(s.trim.toFloat)
+    case _                             => null
+  }
+}
+
+// String
+def gStr(r: Row, name: String): String = {
+  val v = r.getAs[Any](name)
+  if (v == null) null else v.toString
+}
+
+// Date -> java.sql.Date
+def gDate(r: Row, name: String): java.sql.Date = {
+  val v = r.getAs[Any](name)
+  v match {
+    case null                          => null
+    case d: java.sql.Date              => d
+    case d: java.time.LocalDate        => java.sql.Date.valueOf(d)
+    case s: String if s.trim.nonEmpty  =>
+      // try yyyy-MM-dd
+      Try(java.sql.Date.valueOf(s.trim)).getOrElse(null)
+    case _                             => null
+  }
+}
+
+// ==================================================
+// 4. ROW -> CommonDataModel
+//    This EXACT order must match your full-args constructor in CommonDataModel
+// ==================================================
+def toModel(r: Row): CommonDataObject.CommonDataModel =
+  new CommonDataObject.CommonDataModel(
+    gInt (r,"INDV_ID"),
+    gInt (r,"ELEM_NBR"),
+    gDbl (r,"ELEM_QTY"),
+    gInt (r,"AGE"),
+    gStr (r,"MEM_NAME"),
+    gDate(r,"ELEM_DT_1"),
+    gDate(r,"ELEM_DT_2"),
+    gStr (r,"SCOR_TYP_CD"),
+    gFlt (r,"SCOR_VAL"),
+    gInt (r,"PRG_SRVC_ID"),
+    gDate(r,"TRM_DT"),
+    gDate(r,"EFF_DT"),
+    gStr (r,"ST_ABBR_CD"),
+    gStr (r,"OPTUM_SEG_ID"),
+    gDate(r,"ID_RUN_DT"),
+    gInt (r,"OUTBOUND_FILE_ID"),
+    gStr (r,"SCEN_RULE_CD"),
+    gDate(r,"DOB"),
+    gDate(r,"EFFECTIVE_DATE"),
+    gDate(r,"END_DATE"),
+    gStr (r,"MED_DX_OF_INTEREST"),
+    gStr (r,"SCENARIO_CD"),
+    gDate(r,"NEXT_EFFECTIVE_DATE"),
+    gInt (r,"GRACE_PERIOD"),
+    gDate(r,"MIN_EFF_DATE"),
+    gDate(r,"MAX_END_DATE"),
+    gDate(r,"FINAL_END_DATE"),
+    gStr (r,"ADT_CHIEF_COMPLAINT"),
+    gStr (r,"ELEM_SUP"),
+    gStr (r,"CONTINUITY"),
+    gFlt (r,"MED_COV"),
+    gFlt (r,"REL_IPTNT_RISK_12_MO_NBR")
+  )
+
+val memberFacts: Seq[CommonDataObject.CommonDataModel] =
+  srcDF.collect().toSeq.map(toModel)
+
+
+// (optional) inspect a few facts
+// memberFacts.take(2).foreach { f =>
+//   println(
+//     s"""FACT:
+//        | INDV_ID=${f.getIndv_id()}
+//        | ELEM_NBR=${f.getElem_nbr()}
+//        | MEM_NAME=${f.getMem_name()}
+//        | CONTINUITY=${f.getContinuity()}
+//        | CONTINUOUS_PERIOD=${Try(f.getContinuousPeriod()).getOrElse(null)}
+//        | ADJUSTED_FINAL_DATE=${Try(f.getAdjustedFinalDate()).getOrElse(null)}
+//        | AGE_IN_DECIMALS=${Try(f.getAgeInDecimals()).getOrElse(null)}
+//        |""".stripMargin
+//   )
+// }
+
+
+// =====================================================
+// 5. Build a Drools session from DRL files in DBFS
+// =====================================================
+def loadDrlsFromDbfs(dir: String): Seq[(String,String)] = {
+  dbutils.fs.ls(dir)
+    .filter(_.name.toLowerCase.endsWith(".drl"))
+    .map { f =>
+      val body = dbutils.fs.head(f.path)
+      (f.path, body)
+    }
+    .toSeq
+}
+
+val drlFiles: Seq[(String,String)] = loadDrlsFromDbfs("dbfs:/FileStore/rules")
+println(s"📄 Loaded ${drlFiles.size} DRL files:")
+drlFiles.foreach { case (p,_) => println(s"   - $p") }
+
+def buildSessionFromDrlText(files: Seq[(String,String)]): StatelessKieSession = {
+  val ks = KieServices.Factory.get
   val kfs = ks.newKieFileSystem()
-  val dirLocal = dirDbfs.replace("dbfs:/", "/dbfs/")
-  val drlFiles = Option(new java.io.File(dirLocal).listFiles)
-    .getOrElse(Array.empty)
-    .filter(f => f.isFile && f.getName.endsWith(".drl"))
 
-  println(s"🧩 Found DRLs: ${drlFiles.map(_.getName).mkString(", ")}")
-
-  drlFiles.foreach { f =>
-    val body = scala.io.Source.fromFile(f, "UTF-8").mkString
+  files.foreach { case (path, body) =>
     kfs.write(
+      path,
       ResourceFactory
-        .newByteArrayResource(body.getBytes(StandardCharsets.UTF_8))
-        .setSourcePath(s"rules/${f.getName}")
+        .newByteArrayResource(body.getBytes("UTF-8"))
+        .setResourceType(ResourceType.DRL)
     )
   }
 
-  val kb: KieBuilder = ks.newKieBuilder(kfs).buildAll()
-  val res: Results   = kb.getResults
-  if (res.hasMessages(Message.Level.ERROR)) {
-    println("❌ DRL build errors:")
-    res.getMessages(Message.Level.ERROR).forEach(m => println("  " + m))
-    throw new IllegalStateException("DRL compile failed")
+  val kbuilder: KieBuilder = ks.newKieBuilder(kfs).buildAll()
+  val results = kbuilder.getResults
+  if (results.hasMessages(Message.Level.ERROR)) {
+    val errs = results.getMessages(Message.Level.ERROR).asScala.mkString("\n")
+    throw new IllegalStateException(s"DROOLS BUILD ERRORS:\n$errs")
   }
 
-  ks.newKieContainer(ks.getRepository.getDefaultReleaseId).getKieBase
+  val kbase = KieServices.Factory
+    .get
+    .newKieContainer(KieServices.Factory.get.getRepository.getDefaultReleaseId)
+    .getKieBase
+
+  val sess = kbase.newStatelessKieSession()
+
+  // global map if your rules set globals like result.put("ruleNum",...)
+  val resultMap = new java.util.HashMap[String,Object]()
+  sess.setGlobal("result", resultMap)
+
+  sess
 }
 
-def d(s: String): java.sql.Date = Date.valueOf(s)
-
-case class Out(indvId: Long, status: String, active: String)
-
-// ---------- Fire rules for one indv ----------
-def fireForOne(kbase: KieBase, indvId: Long, facts: Seq[CommonDataModel]): Seq[Out] = {
-  val ksession: KieSession = kbase.newKieSession()
-  try {
-    facts.foreach(ksession.insert)
-    val fired = ksession.fireAllRules()
-    println(s"🔥 INDV $indvId -> fired $fired")
-    ksession.getObjects(new ClassObjectFilter(classOf[CommonDataResultSet]))
-      .asScala
-      .collect { case r: CommonDataResultSet =>
-        Out(indvId, Option(r.getStatus).getOrElse("NA"), "Y")
-      }.toSeq
-  } finally ksession.dispose()
-}
-
-// ---------- Run partitioned by indv ----------
-def runPartitionedByIndv(facts: Seq[CommonDataModel], rulesDir: String = "dbfs:/FileStore/rules"): Seq[Out] = {
-  val kbase = buildKieBaseFromFolder(rulesDir)
-  val groups = facts.groupBy(f => Option(f.getIndv_id).map(_.longValue).getOrElse(-1L))
-  groups.toSeq.sortBy(_._1).flatMap { case (indvId, fs) => fireForOne(kbase, indvId, fs) }
-}
-
-// ---------- Demo facts ----------
-val indv1 = 12345: java.lang.Integer
-val indv2 = 99999: java.lang.Integer
-
-def factSetForAdolescent(indv: java.lang.Integer): Seq[CommonDataModel] = {
-  val a = new CommonDataModel(); a.setIndv_id(indv); a.setDob(d("2013-08-15"))
-  val b = new CommonDataModel(); b.setIndv_id(indv); b.setContinuity("365D_Continuous")
-  b.setEffective_date(d("2024-01-01")); b.setMax_end_date(d("2023-12-31"))
-  b.setMin_eff_date(d("2023-01-01")); b.setFinal_end_date(d("2024-12-31"))
-  b.setGrace_period(400: java.lang.Integer)
-  val c = new CommonDataModel(); c.setIndv_id(indv)
-  c.setElem_nbr(3327: java.lang.Integer); c.setMem_name("INDV_ELEMENTS_ATTR_EG")
-  c.setContinuity("365D_Continuous")
-  Seq(a,b,c)
-}
-
-def factSetForAsthma(indv: java.lang.Integer): Seq[CommonDataModel] = {
-  val p = new CommonDataModel(); p.setIndv_id(indv); p.setAge(25: java.lang.Integer)
-  p.setElem_nbr(3018: java.lang.Integer); p.setMem_name("INDV_ELEMENTS_ATTR_EG")
-  val q = new CommonDataModel(); q.setIndv_id(indv)
-  q.setElem_nbr(1125: java.lang.Integer); q.setMem_name("INDV_ELEMENTS_EBM")
-  val r = new CommonDataModel(); r.setIndv_id(indv)
-  r.setElem_nbr(1021: java.lang.Integer); r.setMem_name("INDV_ELEMENTS_ADJ")
-  Seq(p,q,r)
-}
-
-// Combine both members’ facts
-val allFacts = factSetForAdolescent(indv1) ++ factSetForAsthma(indv1) ++ factSetForAsthma(indv2)
-
-// ---------- Run ----------
-val outs = runPartitionedByIndv(allFacts, "dbfs:/FileStore/rules")
-
-println("\n🚀 RESULTS (partitioned by INDV_ID)")
-outs.groupBy(_.indvId).toSeq.sortBy(_._1).foreach { case (id, rows) =>
-  println(s"INDV $id -> ${rows.map(o => s"${o.status}").mkString(", ")}")
-}
-println(s"\n✅ TOTAL ROWS: ${outs.size}")
+val sess: StatelessKieSession = buildSessionFromDrlText(drlFiles)
+println("✅ Built StatelessKieSession")
 
 
+// // =====================================================
+// // 6. INSERT FACTS, FIRE RULES, CAPTURE OUTPUT USING A BATCH COMMAND
+// //    This is the reliable way to get inserted CommonDataResultSet
+// // =====================================================
 
-🧩 Found DRLs: AdolescentImmuneRule.drl, AsthmaRule.drl
-🔥 INDV 12345 -> fired 2
-🔥 INDV 99999 -> fired 1
+// // prepare java.util.ArrayList[AnyRef] of facts
+// val factObjects = new java.util.ArrayList[AnyRef]()
+// memberFacts.foreach(f => factObjects.add(f.asInstanceOf[AnyRef]))
 
-🚀 RESULTS (partitioned by INDV_ID)
-INDV 12345 -> DIMAST0051, NRAIMM0001
-INDV 99999 -> DIMAST0051
+// // prepare Drools commands:
+// //   1. insert all facts
+// //   2. fire all rules
+// //   3. get all objects from working memory
+// val insertCmd    = CommandFactory.newInsertElements(factObjects)
+// val fireCmd      = CommandFactory.newFireAllRules()
+// val getObjectsCmd= CommandFactory.newGetObjects("objects") // returns all facts in session
 
-✅ TOTAL ROWS: 3
+// val batchCmds = new java.util.ArrayList[Command[_]]()
+// batchCmds.add(insertCmd)
+// batchCmds.add(fireCmd)
+// batchCmds.add(getObjectsCmd)
 
+// // run the whole batch in one execute
+// val execResults = sess.execute(CommandFactory.newBatchExecution(batchCmds))
 
+// // execResults now contains whatever was in working memory after rules fired
+// // (including anything your DRL did `insert new CommonDataResultSet(...)` on)
+// val allObjs = execResults.getValue("objects").asInstanceOf[java.util.List[AnyRef]]
 
+// // allObjs.foreach{r =>println(r) }
+// println(s"🚀 Working memory after fireAllRules has ${allObjs.size()} objects")
 
+// // filter to CommonDataResultSet
+// val firedResults: Seq[CommonDataObject.CommonDataResultSet] =
+//   allObjs.asScala.collect {
+//     case r: CommonDataObject.CommonDataResultSet => r
+//   }.toSeq
 
+// println(s"✨ Rules inserted ${firedResults.size} CommonDataResultSet rows for INDV_ID=$targetIndvId")
 
-%scala
-// =========================================================
-// 🧪 Standalone Drools Rule Test in Databricks
-// =========================================================
+// // show statuses (rule IDs)
+// firedResults.foreach { r =>
+//   println(s" -> RULE HIT STATUS = ${r.getStatus()}")
+// }
 
-import org.kie.api.KieServices
-import org.kie.api.builder.Message
-import org.kie.api.io.ResourceType
-import org.kie.internal.io.ResourceFactory
-import org.kie.api.runtime.StatelessKieSession
-import org.kie.internal.command.CommandFactory
-import scala.collection.JavaConverters._
-// Import your CommonDataObject classes
-import CommonDataObject._
-// =========================================================
-// 1️⃣ Load DRL file(s) from DBFS
-// =========================================================
-val rulePaths = Seq(
-  "dbfs:/FileStore/rules/AdolescentImmuneRule.drl"  // change path if needed
-)
-val ks = KieServices.Factory.get
-val kfs = ks.newKieFileSystem()
-rulePaths.foreach { path =>
-  val body = dbutils.fs.head(path)
-  kfs.write(path, ResourceFactory.newByteArrayResource(body.getBytes("UTF-8")).setResourceType(ResourceType.DRL))
-}
+// // also check `result` global if your rules populate it
+// val resultMapAfter =
+//   sess.getGlobals.get("result").asInstanceOf[java.util.HashMap[String,Object]]
 
-val kbuilder = ks.newKieBuilder(kfs).buildAll()
-val results = kbuilder.getResults
-if (results.hasMessages(Message.Level.ERROR)) {
-  throw new IllegalStateException("🔥 Drools build error:\n" + results.getMessages.asScala.mkString("\n"))
-}
+// val ruleNum  = Option(resultMapAfter.get("ruleNum")).map(_.toString).getOrElse("NA")
+// val ruleFlag = Option(resultMapAfter.get("ruleFlag")).exists(_.toString.equalsIgnoreCase("true"))
+// val isActive = Option(resultMapAfter.get("isActive")).map(_.toString).getOrElse("Y")
 
-val kbase = ks.newKieContainer(ks.getRepository.getDefaultReleaseId).getKieBase
-val sess: StatelessKieSession = kbase.newStatelessKieSession()
+// println(s"🌍 Global result map after run:")
+// println(s"    ruleNum  = $ruleNum")
+// println(s"    ruleFlag = $ruleFlag")
+// println(s"    isActive = $isActive")
 
-println("✅ DRL loaded successfully\n")
+// // build final row(s) shaped like Snowflake STREAMLIT_RESULTS_KIS
+// case class OutRow(
+//   INDV_ID: Long,
+//   RULE_NUM: String,
+//   RULE_FLAG: Boolean,
+//   IS_ACTIVE: String
+// )
 
-import java.sql.Date
-val indv1 = 12345: java.lang.Integer
-def factSetForAdolescent(indv: java.lang.Integer): Seq[CommonDataModel] = {
-  val a = new CommonDataModel(); a.setIndv_id(indv); a.setDob(d("2013-08-15"))
-  val b = new CommonDataModel(); b.setIndv_id(indv); b.setContinuity("365D_Continuous")
-  b.setEffective_date(d("2024-01-01")); b.setMax_end_date(d("2023-12-31"))
-  b.setMin_eff_date(d("2023-01-01")); b.setFinal_end_date(d("2024-12-31"))
-  b.setGrace_period(400: java.lang.Integer)
-  val c = new CommonDataModel(); c.setIndv_id(indv)
-  c.setElem_nbr(3327: java.lang.Integer); c.setMem_name("INDV_ELEMENTS_ATTR_EG")
-  c.setContinuity("365D_Continuous")
-  Seq(a,b,c)
-}
-def d(s: String): java.sql.Date = Date.valueOf(s)
-val testFacts=factSetForAdolescent(indv1)
-println(s"🧩 Created ${testFacts.size} test facts")
+// val outRowsFinal: Seq[OutRow] =
+//   if (firedResults.isEmpty) {
+//     Seq.empty
+//   } else {
+//     firedResults.map { fr =>
+//       OutRow(
+//         INDV_ID   = targetIndvId,
+//         RULE_NUM  = Option(fr.getStatus()).getOrElse("NA"),
+//         RULE_FLAG = true,
+//         IS_ACTIVE = "Y"
+//       )
+//     }
+//   }
+
+// println(s"🧾 Final rows we would write back:")
+// outRowsFinal.foreach(println)
+
+// // turn into DF for finalSnowflake write shape
+// val finalDF =
+//   spark.createDataFrame(outRowsFinal)
+//     .withColumn("AUDIT_CREAT_DT", current_timestamp())
+
+// println("📦 finalDF preview:")
+// finalDF.show(false)
 val factObjects = new java.util.ArrayList[AnyRef]()
-testFacts.foreach(f => factObjects.add(f.asInstanceOf[AnyRef]))
+memberFacts.foreach(f => factObjects.add(f.asInstanceOf[AnyRef]))
+
+// prepare Drools commands:
+//   1. insert all facts
+//   2. fire all rules
+//   3. get all objects from working memory (and NAME it "objects")
 val insertCmd     = CommandFactory.newInsertElements(factObjects)
 val fireCmd       = CommandFactory.newFireAllRules()
 val getObjectsCmd = CommandFactory.newGetObjects("objects")
-val batchCmds = new java.util.ArrayList[org.kie.api.command.Command[_]]()
+
+val batchCmds = new java.util.ArrayList[Command[_]]()
 batchCmds.add(insertCmd)
 batchCmds.add(fireCmd)
 batchCmds.add(getObjectsCmd)
+
+// run the batch
 val execResults = sess.execute(CommandFactory.newBatchExecution(batchCmds))
+
+// ✅ now "objects" will exist in results
 val allObjs = execResults.getValue("objects").asInstanceOf[java.util.List[AnyRef]]
+
 if (allObjs == null) {
-  println("⚠️ No objects returned — rule might not have fired.")
+  println("⚠️ allObjs was null — no objects returned from Drools.")
 } else {
-  println(s"🚀 Working memory contains ${allObjs.size()} objects after firing rules")
-}
-val resultSets = Option(allObjs)
-  .map(_.asScala.collect { case r: CommonDataResultSet => r }.toSeq)
-  .getOrElse(Seq.empty)
-
-println(s"✨ Inserted ${resultSets.size} CommonDataResultSet objects")
-resultSets.foreach { r =>
-  println(s"✅ RULE FIRED → STATUS = ${r.getStatus}")
+  println(s"🚀 Working memory after fireAllRules has ${allObjs.size()} objects")
 }
 
+// filter only CommonDataResultSet
+val firedResults: Seq[CommonDataObject.CommonDataResultSet] =
+  Option(allObjs)
+    .map(_.asScala.collect {
+      case r: CommonDataObject.CommonDataResultSet => r
+    }.toSeq)
+    .getOrElse(Seq.empty)
 
+println(s"✨ Rules inserted ${firedResults.size} CommonDataResultSet rows for INDV_ID=$targetIndvId")
 
-✅ DRL loaded successfully
+// print rule statuses
+firedResults.foreach(r => println(s" -> RULE HIT STATUS = ${r.getStatus()}"))
 
-🧩 Created 3 test facts
-🚀 Working memory contains 3 objects after firing rules
-✨ Inserted 0 CommonDataResultSet objects
+// global map
+val resultMapAfter =
+  sess.getGlobals.get("result").asInstanceOf[java.util.HashMap[String,Object]]
+
+val ruleNum  = Option(resultMapAfter.get("ruleNum")).map(_.toString).getOrElse("NA")
+val ruleFlag = Option(resultMapAfter.get("ruleFlag")).exists(_.toString.equalsIgnoreCase("true"))
+val isActive = Option(resultMapAfter.get("isActive")).map(_.toString).getOrElse("Y")
+
+println(s"🌍 Global result map after run:")
+println(s"    ruleNum  = $ruleNum")
+println(s"    ruleFlag = $ruleFlag")
+println(s"    isActive = $isActive")
+
+// build final rows for Snowflake
+case class OutRow(
+  INDV_ID: Long,
+  RULE_NUM: String,
+  RULE_FLAG: Boolean,
+  IS_ACTIVE: String
+)
+
+val outRowsFinal: Seq[OutRow] =
+  firedResults.map(fr =>
+    OutRow(
+      INDV_ID   = targetIndvId,
+      RULE_NUM  = Option(fr.getStatus()).getOrElse("NA"),
+      RULE_FLAG = true,
+      IS_ACTIVE = "Y"
+    )
+  )
+
+println(s"🧾 Final rows we would write back:")
+outRowsFinal.foreach(println)
+
+val finalDF =
+  spark.createDataFrame(outRowsFinal)
+    .withColumn("AUDIT_CREAT_DT", current_timestamp())
+
+println("📦 finalDF preview:")
+finalDF.show(false)
