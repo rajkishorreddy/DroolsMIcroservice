@@ -1,62 +1,93 @@
 // =====================================================
-// 6. Insert facts, fire rules, collect output
+// 6. Insert facts, fire rules, collect + aggregate like Snowflake
 // =====================================================
+import org.kie.api.runtime.ClassObjectFilter
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.scala.DefaultScalaModule
+
+// insert all facts for this INDV_ID
 memberFacts.foreach(sess.insert)
 
+// fire rules
 val fired = sess.fireAllRules()
-println(s"🔥 Fired $fired rules")
+println(s"🔥 Fired $fired rules for INDV_ID=$targetIndvId")
 
-import org.kie.api.runtime.ClassObjectFilter
+// pull EVERYTHING that's not an input CommonDataModel
+val allAfterFire_raw: Seq[AnyRef] =
+  sess.getObjects(/* no filter = all objects */).asScala.toSeq.map(_.asInstanceOf[AnyRef])
 
-// ✅ explicitly cast to Seq[AnyRef]
-val rawResults: Seq[AnyRef] =
-  sess.getObjects(new ClassObjectFilter(classOf[CommonDataObject.CommonDataResultSet]))
-    .asScala
-    .toSeq
-    .map(_.asInstanceOf[AnyRef])
+val nonInputFacts: Seq[AnyRef] =
+  allAfterFire_raw.filterNot(_.isInstanceOf[CommonDataObject.CommonDataModel])
 
-println(s"✨ Drools working memory returned ${rawResults.size} objects")
+println(s"🧪 Session produced ${nonInputFacts.size} non-input facts after rules")
 
-// filter for CommonDataResultSet
-val typedResults: Seq[CommonDataObject.CommonDataResultSet] =
-  rawResults.collect {
-    case r: CommonDataObject.CommonDataResultSet => r
-  }
-
-println(s"✅ After casting, we have ${typedResults.size} CommonDataResultSet rows for INDV_ID=$targetIndvId")
-
-typedResults.foreach { r =>
-  println(s" -> RULE HIT STATUS = ${r.getStatus()}")
+// mirror factsToString() logic from Snowflake
+val mapper = {
+  val m = new ObjectMapper()
+  // register Scala module so case classes serialize cleanly too
+  m.registerModule(DefaultScalaModule)
+  m
 }
 
-// final case class for Snowflake output
-case class OutRow(
+val maxLen = 5000
+val sb     = new StringBuilder()
+sb.append("[")
+
+val seen = new java.util.HashSet[String]()
+var first = true
+var stop  = false
+
+nonInputFacts.foreach { fact =>
+  if (!stop) {
+    val json = try {
+      mapper.writeValueAsString(fact)
+    } catch {
+      case e: Exception =>
+        // mimic legacy "append '' if can't serialize"
+        ""
+    }
+
+    if (json != "" && seen.add(json)) {
+      if (!first) sb.append(", ")
+      sb.append(json)
+      first = false
+
+      if (sb.length > maxLen) {
+        sb.setLength(maxLen)
+        sb.append("...")
+        stop = true
+      }
+    }
+  }
+}
+
+sb.append("]")
+val aggregatedJsonString = sb.toString()
+
+println("📦 Aggregated (factsToString-style) output:")
+println(aggregatedJsonString)
+
+// build final single-row output just like endPartition() returned
+case class FinalRowForSnowflake(
   INDV_ID: Long,
-  RULE_NUM: String,
-  RULE_FLAG: Boolean,
-  IS_ACTIVE: String
+  RULE_RESULTS_JSON: String,
+  AUDIT_CREAT_DT: java.sql.Timestamp
 )
 
-// build final output rows
-val outRowsFinal: Seq[OutRow] =
-  typedResults.map { r =>
-    OutRow(
-      INDV_ID   = targetIndvId,
-      RULE_NUM  = Option(r.getStatus()).getOrElse("NA"),
-      RULE_FLAG = true,
-      IS_ACTIVE = "Y"
-    )
-  }
+import java.sql.Timestamp
+val nowTs = new Timestamp(System.currentTimeMillis())
 
-println("🧾 Final rows we would write back:")
-outRowsFinal.foreach(println)
+val finalRowObj = FinalRowForSnowflake(
+  INDV_ID = targetIndvId,
+  RULE_RESULTS_JSON = aggregatedJsonString,
+  AUDIT_CREAT_DT = nowTs
+)
 
-// build DataFrame
-val finalDF =
-  spark.createDataFrame(outRowsFinal)
-    .withColumn("AUDIT_CREAT_DT", current_timestamp())
+// turn into a DataFrame with ONE ROW for this INDV_ID
+val finalDF = spark.createDataFrame(Seq(finalRowObj))
 
-println("📦 finalDF preview:")
-finalDF.show(false)
+println("🚀 Final DF (1 row per INDV_ID) like Snowflake UDTF:")
+finalDF.show(truncate=false)
 
+// cleanup session
 sess.dispose()
