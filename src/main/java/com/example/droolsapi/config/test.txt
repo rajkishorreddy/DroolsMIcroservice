@@ -8,15 +8,16 @@ println(s"🔥 Fired $fired rules")
 
 import org.kie.api.runtime.ClassObjectFilter
 
-// grab all CommonDataResultSet objects from the KieSession
+// ✅ explicitly cast to Seq[AnyRef]
 val rawResults: Seq[AnyRef] =
   sess.getObjects(new ClassObjectFilter(classOf[CommonDataObject.CommonDataResultSet]))
     .asScala
     .toSeq
+    .map(_.asInstanceOf[AnyRef])
 
-println(s"✨ Drools working memory returned ${rawResults.size} objects of type CommonDataResultSet (or similar)")
+println(s"✨ Drools working memory returned ${rawResults.size} objects")
 
-// cast them to the actual type so we can call getters
+// filter for CommonDataResultSet
 val typedResults: Seq[CommonDataObject.CommonDataResultSet] =
   rawResults.collect {
     case r: CommonDataObject.CommonDataResultSet => r
@@ -36,7 +37,7 @@ case class OutRow(
   IS_ACTIVE: String
 )
 
-// build final output rows from typedResults
+// build final output rows
 val outRowsFinal: Seq[OutRow] =
   typedResults.map { r =>
     OutRow(
@@ -50,7 +51,7 @@ val outRowsFinal: Seq[OutRow] =
 println("🧾 Final rows we would write back:")
 outRowsFinal.foreach(println)
 
-// turn into DF and add audit timestamp
+// build DataFrame
 val finalDF =
   spark.createDataFrame(outRowsFinal)
     .withColumn("AUDIT_CREAT_DT", current_timestamp())
@@ -58,5 +59,4 @@ val finalDF =
 println("📦 finalDF preview:")
 finalDF.show(false)
 
-// always dispose session at the end
 sess.dispose()
