@@ -1,246 +1,10 @@
-%scala
-
 // =====================================================
-// 0. Imports
+// 6. INSERT FACTS, FIRE RULES, CAPTURE OUTPUT USING BATCH COMMAND
 // =====================================================
-import org.apache.spark.sql.{Row, DataFrame}
-import org.apache.spark.sql.functions._
-import scala.util.Try
-import scala.collection.JavaConverters._
 
-import org.kie.api.KieServices
-import org.kie.api.builder.{KieBuilder, Message}
-import org.kie.api.io.ResourceType
-import org.kie.api.runtime.StatelessKieSession
-import org.kie.internal.io.ResourceFactory
-import org.kie.api.command.Command
 import org.kie.internal.command.CommandFactory
-
-// =====================================================
-// 1. Snowflake connection (use your working values)
-// =====================================================
-val pemB64: String =
-  dbutils.fs.head("dbfs:/FileStore/keys/sf_pk_base64.txt", 1024*1024)
-
-val sfOptions = Map(
-  "sfURL"          -> "uhgdwaas.east-us-2.azure.snowflakecomputing.com",
-  "sfUser"         -> "BEERAVALLI_REDDY@OPTUM.COM",
-  "sfRole"         -> "AZU_SDRP_LUTF_STG_DEVELOPER_ROLE",
-  "sfWarehouse"    -> "LUTF_STG_EVISOR_WH",
-  "sfDatabase"     -> "LUTF_STG_EVISOR_DB",
-  "sfSchema"       -> "ETL",
-  "authenticator"  -> "SNOWFLAKE_JWT",
-  "pem_private_key"-> pemB64
-)
-
-// =====================================================
-// 2. Pick ONE INDV_ID to test
-// =====================================================
-val targetIndvId: Long = 60618623L  // <-- change this to whichever member you want
-
-val srcDF: DataFrame =
-  spark.read
-    .format("snowflake")
-    .options(sfOptions)
-    .option(
-      "query",
-      s"""
-         |SELECT *
-         |FROM ELEMENT_DATA_TABLE_KIS
-         |WHERE INDV_ID = $targetIndvId
-       """.stripMargin
-    )
-    .load()
-
-println(s"✅ Loaded ${srcDF.count()} rows for INDV_ID=$targetIndvId")
-
-srcDF.show(false)
-
-
-// =====================================================
-// 3. Helpers to pull typed values from Row for CommonDataModel
-// =====================================================
-def gInt(r: Row, name: String): java.lang.Integer = {
-  val v = r.getAs[Any](name)
-  v match {
-    case null                         => null
-    case n: java.lang.Integer         => n
-    case n: java.lang.Long            => Integer.valueOf(n.intValue)
-    case n: java.lang.Short           => Integer.valueOf(n.intValue)
-    case n: java.lang.Byte            => Integer.valueOf(n.intValue)
-    case n: java.math.BigDecimal      => Integer.valueOf(n.intValue)
-    case s: String if s.trim.nonEmpty => Integer.valueOf(s.trim.toInt)
-    case _                            => null
-  }
-}
-
-def gDbl(r: Row, name: String): java.lang.Double = {
-  val v = r.getAs[Any](name)
-  v match {
-    case null                         => null
-    case n: java.lang.Double          => n
-    case n: java.lang.Float           => java.lang.Double.valueOf(n.toDouble)
-    case n: java.math.BigDecimal      => java.lang.Double.valueOf(n.doubleValue)
-    case n: java.lang.Long            => java.lang.Double.valueOf(n.toDouble)
-    case n: java.lang.Integer         => java.lang.Double.valueOf(n.toDouble)
-    case s: String if s.trim.nonEmpty => java.lang.Double.valueOf(s.trim.toDouble)
-    case _                            => null
-  }
-}
-
-def gFlt(r: Row, name: String): java.lang.Float = {
-  val v = r.getAs[Any](name)
-  v match {
-    case null                         => null
-    case n: java.lang.Float           => n
-    case n: java.lang.Double          => java.lang.Float.valueOf(n.toFloat)
-    case n: java.math.BigDecimal      => java.lang.Float.valueOf(n.floatValue)
-    case n: java.lang.Long            => java.lang.Float.valueOf(n.toFloat)
-    case n: java.lang.Integer         => java.lang.Float.valueOf(n.toFloat)
-    case s: String if s.trim.nonEmpty => java.lang.Float.valueOf(s.trim.toFloat)
-    case _                            => null
-  }
-}
-
-def gStr(r: Row, name: String): String = {
-  val v = r.getAs[Any](name)
-  if (v == null) null else v.toString
-}
-
-def gDate(r: Row, name: String): java.sql.Date = {
-  val v = r.getAs[Any](name)
-  v match {
-    case null                         => null
-    case d: java.sql.Date            => d
-    case d: java.time.LocalDate      => java.sql.Date.valueOf(d)
-    case s: String if s.trim.nonEmpty =>
-      Try(java.sql.Date.valueOf(s.trim)).getOrElse(null)
-    case _                            => null
-  }
-}
-
-
-// =====================================================
-// 4. Convert the Snowflake rows -> CommonDataModel objects
-//    This MUST match your CommonDataModel constructor order.
-//    Update the order/columns here to match YOUR class exactly.
-// =====================================================
-def toModel(r: Row): CommonDataObject.CommonDataModel =
-  new CommonDataObject.CommonDataModel(
-    gInt(r,"INDV_ID"),
-    gInt(r,"ELEM_NBR"),
-    gDbl(r,"ELEM_QTY"),
-    gInt(r,"AGE"),
-    gStr(r,"MEM_NAME"),
-    gDate(r,"ELEM_DT_1"),
-    gDate(r,"ELEM_DT_2"),
-    gStr(r,"SCOR_TYP_CD"),
-    gFlt(r,"SCOR_VAL"),
-    gInt(r,"PRG_SRVC_ID"),
-    gDate(r,"TRM_DT"),
-    gDate(r,"EFF_DT"),
-    gStr(r,"ST_ABBR_CD"),
-    gStr(r,"OPTUM_SEG_ID"),
-    gStr(r,"OUTBOUND_FILE_ID"),
-    gDate(r,"ID_RUN_DT"),
-    gStr(r,"SCEN_RULE_CD"),
-    gDate(r,"DOB"),
-    gDate(r,"EFFECTIVE_DATE"),
-    gDate(r,"END_DATE"),
-    gStr(r,"MED_DX_OF_INTEREST"),
-    gStr(r,"SCENARIO_CD"),
-    gDate(r,"NEXT_EFFECTIVE_DATE"),
-    gInt(r,"GRACE_PERIOD"),
-    gDate(r,"MIN_EFF_DATE"),
-    gDate(r,"MAX_END_DATE"),
-    gDate(r,"FINAL_END_DATE"),
-    gStr(r,"ADT_CHIEF_COMPLAINT"),
-    gStr(r,"ELEM_SUP"),
-    gStr(r,"CONTINUITY"),
-    gFlt(r,"MED_COV"),
-    gFlt(r,"REL_IPTNT_RISK_12_MO_NBR")
-  )
-
-val memberFacts: Seq[CommonDataObject.CommonDataModel] =
-  srcDF.collect().toSeq.map(toModel)
-
-println(s"🔍 Built ${memberFacts.size} CommonDataModel facts for INDV_ID=$targetIndvId")
-
-// (optional) inspect a few facts
-memberFacts.take(5).foreach { f =>
-  println(
-    s"""FACT:
-       | INDV_ID=${f.getIndv_id()}
-       | ELEM_NBR=${f.getElem_nbr()}
-       | MEM_NAME=${f.getMem_name()}
-       | CONTINUITY=${f.getContinuity()}
-       | CONTINUOUS_PERIOD=${Try(f.getContinuousPeriod()).getOrElse(null)}
-       | ADJUSTED_FINAL_DATE=${Try(f.getAdjustedFinalDate()).getOrElse(null)}
-       | AGE_IN_DECIMALS=${Try(f.getAgeInDecimals()).getOrElse(null)}
-       |""".stripMargin
-  )
-}
-
-
-// =====================================================
-// 5. Build a Drools session from DRL files in DBFS
-// =====================================================
-def loadDrlsFromDbfs(dir: String): Seq[(String,String)] = {
-  dbutils.fs.ls(dir)
-    .filter(_.name.toLowerCase.endsWith(".drl"))
-    .map { f =>
-      val body = dbutils.fs.head(f.path)
-      (f.path, body)
-    }
-    .toSeq
-}
-
-val drlFiles: Seq[(String,String)] = loadDrlsFromDbfs("dbfs:/FileStore/rules")
-println(s"📄 Loaded ${drlFiles.size} DRL files:")
-drlFiles.foreach { case (p,_) => println(s"   - $p") }
-
-def buildSessionFromDrlText(files: Seq[(String,String)]): StatelessKieSession = {
-  val ks = KieServices.Factory.get
-  val kfs = ks.newKieFileSystem()
-
-  files.foreach { case (path, body) =>
-    kfs.write(
-      path,
-      ResourceFactory
-        .newByteArrayResource(body.getBytes("UTF-8"))
-        .setResourceType(ResourceType.DRL)
-    )
-  }
-
-  val kbuilder: KieBuilder = ks.newKieBuilder(kfs).buildAll()
-  val results = kbuilder.getResults
-  if (results.hasMessages(Message.Level.ERROR)) {
-    val errs = results.getMessages(Message.Level.ERROR).asScala.mkString("\n")
-    throw new IllegalStateException(s"DROOLS BUILD ERRORS:\n$errs")
-  }
-
-  val kbase = KieServices.Factory
-    .get
-    .newKieContainer(KieServices.Factory.get.getRepository.getDefaultReleaseId)
-    .getKieBase
-
-  val sess = kbase.newStatelessKieSession()
-
-  // global map if your rules set globals like result.put("ruleNum",...)
-  val resultMap = new java.util.HashMap[String,Object]()
-  sess.setGlobal("result", resultMap)
-
-  sess
-}
-
-val sess: StatelessKieSession = buildSessionFromDrlText(drlFiles)
-println("✅ Built StatelessKieSession")
-
-
-// =====================================================
-// 6. INSERT FACTS, FIRE RULES, CAPTURE OUTPUT USING A BATCH COMMAND
-//    This is the reliable way to get inserted CommonDataResultSet
-// =====================================================
+import org.kie.api.command.Command
+import scala.collection.JavaConverters._
 
 // prepare java.util.ArrayList[AnyRef] of facts
 val factObjects = new java.util.ArrayList[AnyRef]()
@@ -249,39 +13,42 @@ memberFacts.foreach(f => factObjects.add(f.asInstanceOf[AnyRef]))
 // prepare Drools commands:
 //   1. insert all facts
 //   2. fire all rules
-//   3. get all objects from working memory
-val insertCmd    = CommandFactory.newInsertElements(factObjects)
-val fireCmd      = CommandFactory.newFireAllRules()
-val getObjectsCmd= CommandFactory.newGetObjects() // returns all facts in session
+//   3. get all objects from working memory (and NAME it "objects")
+val insertCmd     = CommandFactory.newInsertElements(factObjects)
+val fireCmd       = CommandFactory.newFireAllRules()
+val getObjectsCmd = CommandFactory.newGetObjects("objects")
 
 val batchCmds = new java.util.ArrayList[Command[_]]()
 batchCmds.add(insertCmd)
 batchCmds.add(fireCmd)
 batchCmds.add(getObjectsCmd)
 
-// run the whole batch in one execute
+// run the batch
 val execResults = sess.execute(CommandFactory.newBatchExecution(batchCmds))
 
-// execResults now contains whatever was in working memory after rules fired
-// (including anything your DRL did `insert new CommonDataResultSet(...)` on)
+// ✅ now "objects" will exist in results
 val allObjs = execResults.getValue("objects").asInstanceOf[java.util.List[AnyRef]]
 
-println(s"🚀 Working memory after fireAllRules has ${allObjs.size()} objects")
+if (allObjs == null) {
+  println("⚠️ allObjs was null — no objects returned from Drools.")
+} else {
+  println(s"🚀 Working memory after fireAllRules has ${allObjs.size()} objects")
+}
 
-// filter to CommonDataResultSet
+// filter only CommonDataResultSet
 val firedResults: Seq[CommonDataObject.CommonDataResultSet] =
-  allObjs.asScala.collect {
-    case r: CommonDataObject.CommonDataResultSet => r
-  }.toSeq
+  Option(allObjs)
+    .map(_.asScala.collect {
+      case r: CommonDataObject.CommonDataResultSet => r
+    }.toSeq)
+    .getOrElse(Seq.empty)
 
 println(s"✨ Rules inserted ${firedResults.size} CommonDataResultSet rows for INDV_ID=$targetIndvId")
 
-// show statuses (rule IDs)
-firedResults.foreach { r =>
-  println(s" -> RULE HIT STATUS = ${r.getStatus()}")
-}
+// print rule statuses
+firedResults.foreach(r => println(s" -> RULE HIT STATUS = ${r.getStatus()}"))
 
-// also check `result` global if your rules populate it
+// global map
 val resultMapAfter =
   sess.getGlobals.get("result").asInstanceOf[java.util.HashMap[String,Object]]
 
@@ -294,7 +61,7 @@ println(s"    ruleNum  = $ruleNum")
 println(s"    ruleFlag = $ruleFlag")
 println(s"    isActive = $isActive")
 
-// build final row(s) shaped like Snowflake STREAMLIT_RESULTS_KIS
+// build final rows for Snowflake
 case class OutRow(
   INDV_ID: Long,
   RULE_NUM: String,
@@ -303,23 +70,18 @@ case class OutRow(
 )
 
 val outRowsFinal: Seq[OutRow] =
-  if (firedResults.isEmpty) {
-    Seq.empty
-  } else {
-    firedResults.map { fr =>
-      OutRow(
-        INDV_ID   = targetIndvId,
-        RULE_NUM  = Option(fr.getStatus()).getOrElse("NA"),
-        RULE_FLAG = true,
-        IS_ACTIVE = "Y"
-      )
-    }
-  }
+  firedResults.map(fr =>
+    OutRow(
+      INDV_ID   = targetIndvId,
+      RULE_NUM  = Option(fr.getStatus()).getOrElse("NA"),
+      RULE_FLAG = true,
+      IS_ACTIVE = "Y"
+    )
+  )
 
 println(s"🧾 Final rows we would write back:")
 outRowsFinal.foreach(println)
 
-// turn into DF for finalSnowflake write shape
 val finalDF =
   spark.createDataFrame(outRowsFinal)
     .withColumn("AUDIT_CREAT_DT", current_timestamp())
