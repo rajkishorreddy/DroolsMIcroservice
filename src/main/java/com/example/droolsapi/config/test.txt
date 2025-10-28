@@ -1,90 +1,41 @@
 // =====================================================
-// 6. INSERT FACTS, FIRE RULES, CAPTURE OUTPUT USING BATCH COMMAND
+// Force a guaranteed rule hit for AdolescentImmuneRule
 // =====================================================
-
-import org.kie.internal.command.CommandFactory
-import org.kie.api.command.Command
-import scala.collection.JavaConverters._
-
-// prepare java.util.ArrayList[AnyRef] of facts
-val factObjects = new java.util.ArrayList[AnyRef]()
-memberFacts.foreach(f => factObjects.add(f.asInstanceOf[AnyRef]))
-
-// prepare Drools commands:
-//   1. insert all facts
-//   2. fire all rules
-//   3. get all objects from working memory (and NAME it "objects")
-val insertCmd     = CommandFactory.newInsertElements(factObjects)
-val fireCmd       = CommandFactory.newFireAllRules()
-val getObjectsCmd = CommandFactory.newGetObjects("objects")
-
-val batchCmds = new java.util.ArrayList[Command[_]]()
-batchCmds.add(insertCmd)
-batchCmds.add(fireCmd)
-batchCmds.add(getObjectsCmd)
-
-// run the batch
-val execResults = sess.execute(CommandFactory.newBatchExecution(batchCmds))
-
-// ✅ now "objects" will exist in results
-val allObjs = execResults.getValue("objects").asInstanceOf[java.util.List[AnyRef]]
-
-if (allObjs == null) {
-  println("⚠️ allObjs was null — no objects returned from Drools.")
-} else {
-  println(s"🚀 Working memory after fireAllRules has ${allObjs.size()} objects")
-}
-
-// filter only CommonDataResultSet
-val firedResults: Seq[CommonDataObject.CommonDataResultSet] =
-  Option(allObjs)
-    .map(_.asScala.collect {
-      case r: CommonDataObject.CommonDataResultSet => r
-    }.toSeq)
-    .getOrElse(Seq.empty)
-
-println(s"✨ Rules inserted ${firedResults.size} CommonDataResultSet rows for INDV_ID=$targetIndvId")
-
-// print rule statuses
-firedResults.foreach(r => println(s" -> RULE HIT STATUS = ${r.getStatus()}"))
-
-// global map
-val resultMapAfter =
-  sess.getGlobals.get("result").asInstanceOf[java.util.HashMap[String,Object]]
-
-val ruleNum  = Option(resultMapAfter.get("ruleNum")).map(_.toString).getOrElse("NA")
-val ruleFlag = Option(resultMapAfter.get("ruleFlag")).exists(_.toString.equalsIgnoreCase("true"))
-val isActive = Option(resultMapAfter.get("isActive")).map(_.toString).getOrElse("Y")
-
-println(s"🌍 Global result map after run:")
-println(s"    ruleNum  = $ruleNum")
-println(s"    ruleFlag = $ruleFlag")
-println(s"    isActive = $isActive")
-
-// build final rows for Snowflake
-case class OutRow(
-  INDV_ID: Long,
-  RULE_NUM: String,
-  RULE_FLAG: Boolean,
-  IS_ACTIVE: String
+val testFacts = Seq(
+  {
+    val m = new CommonDataObject.CommonDataModel()
+    m.setIndv_id(99999)
+    m.setElem_nbr(3327)
+    m.setMem_name("INDV_ELEMENTS_ATTR_EG")
+    m.setAgeInDecimals(true)
+    m.setAdjustedFinalDate(400)            // >= 320
+    m.setContinuity("365D_Continuous")
+    m.setContinuousPeriod(400)
+    m
+  },
+  {
+    val m = new CommonDataObject.CommonDataModel()
+    m.setIndv_id(99999)
+    m.setElem_nbr(9999)
+    m.setMem_name("RANDOM_ELEM")
+    m.setAgeInDecimals(true)
+    m.setAdjustedFinalDate(100)
+    m.setContinuity("365D_Continuous")
+    m.setContinuousPeriod(100)
+    m
+  },
+  {
+    val m = new CommonDataObject.CommonDataModel()
+    m.setIndv_id(99999)
+    m.setElem_nbr(1111)
+    m.setMem_name("OTHER")
+    m.setAgeInDecimals(false)
+    m
+  }
 )
 
-val outRowsFinal: Seq[OutRow] =
-  firedResults.map(fr =>
-    OutRow(
-      INDV_ID   = targetIndvId,
-      RULE_NUM  = Option(fr.getStatus()).getOrElse("NA"),
-      RULE_FLAG = true,
-      IS_ACTIVE = "Y"
-    )
-  )
+val combinedFacts = memberFacts ++ testFacts
+println(s"🧪 Injected ${testFacts.size} test facts for INDV_ID=99999")
 
-println(s"🧾 Final rows we would write back:")
-outRowsFinal.foreach(println)
-
-val finalDF =
-  spark.createDataFrame(outRowsFinal)
-    .withColumn("AUDIT_CREAT_DT", current_timestamp())
-
-println("📦 finalDF preview:")
-finalDF.show(false)
+// then below, replace your fact load line with:
+combinedFacts.foreach(f => factObjects.add(f.asInstanceOf[AnyRef]))
