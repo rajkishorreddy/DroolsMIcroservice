@@ -1,38 +1,48 @@
 from pyspark.sql import functions as F
-from pyspark.sql.window import Window
 
-# -------- 0) Load full table (you said: select * from table) --------
+# -------- 0) Read only what we need (pushdown) --------
+needed_cols_sql = """
+SELECT
+  INDV_ID, AGE, ELEM_NBR, MEM_NAME, ELEM_SUP,
+  GRACE_PERIOD, CONTINUITY,
+  EFFECTIVE_DATE, MAX_END_DATE, FINAL_END_DATE, MIN_EFF_DATE,
+  ELEM_DT_2
+FROM ELEMENT_DATA_TABLE_KIS
+WHERE
+  -- any row that could possibly matter for this rule
+  (AGE BETWEEN 6 AND 11) OR
+  (MEM_NAME IN ('INDV_ELEMENTS_PHARM','INDV_ELEMENTS_ADJ','INDV_ELEMENTS_ATTR_EG')) OR
+  (ELEM_NBR IN (2563,2575,2576,3488,3496,3159,3103))
+"""
 df = (
     spark.read.format("snowflake")
     .options(**snowflake_options)
-    .option("dbtable", "ELEMENT_DATA_TABLE_KIS")   # change if needed
+    .option("query", needed_cols_sql)
     .load()
 )
 
-# -------- 1) Derived columns to mirror Java getters --------
+# -------- 1) Derived columns (conditional to avoid wasted CPU) --------
 
-# 1a) getContinuousPeriod(): use GRACE_PERIOD as CONTINUOUS_PERIOD
+# getContinuousPeriod(): GRACE_PERIOD -> CONTINUOUS_PERIOD
 if "GRACE_PERIOD" in df.columns and "CONTINUOUS_PERIOD" not in df.columns:
     df = df.withColumnRenamed("GRACE_PERIOD", "CONTINUOUS_PERIOD")
 
-# 1b) ePdcNumeratorInDays (from elem_sup when startsWith "PHARM 2")
-# Java substr(15,18) [0-based, end-exclusive] -> Spark substring(16, 3)
-pdc_base = F.when(
-    (F.col("ELEM_SUP").isNotNull()) &
-    (F.length("ELEM_SUP") > 18) &
-    (F.substring("ELEM_SUP", 1, 7) == F.lit("PHARM 2")),
-    F.substring("ELEM_SUP", 16, 3)
-)
-pdc_digits = F.regexp_replace(pdc_base, r"[^0-9-]", "")
+# ePdcNumeratorInDays only on PHARM rows with "PHARM 2"
+is_pharm = (F.col("MEM_NAME") == "INDV_ELEMENTS_PHARM")
+has_p2   = F.col("ELEM_SUP").isNotNull() & F.col("ELEM_SUP").startswith("PHARM 2") & (F.length("ELEM_SUP") > 18)
+pdc_slice = F.when(is_pharm & has_p2, F.substring("ELEM_SUP", 16, 3))
 df = df.withColumn(
     "E_PDC_NUMERATOR_IN_DAYS",
-    F.when(F.length(pdc_digits) > 0, pdc_digits.cast("int"))
+    F.when(pdc_slice.isNotNull(),
+           F.regexp_replace(pdc_slice, r"[^0-9-]", "").cast("int"))
 )
 
-# 1c) adjustedFinalDate
+# adjustedFinalDate (only when continuity might be relevant)
+need_adj = (F.col("CONTINUITY") == "365D_Continuous")
 df = df.withColumn(
     "ADJUSTED_FINAL_DATE",
     F.when(
+        need_adj &
         F.col("EFFECTIVE_DATE").isNotNull() &
         F.col("MAX_END_DATE").isNotNull() &
         (F.col("EFFECTIVE_DATE") > F.col("MAX_END_DATE")) &
@@ -42,99 +52,71 @@ df = df.withColumn(
     )
 )
 
-# 1d) isElemDt2XDays (days between elem_dt_2 and today-43)
+# isElemDt2XDays only on ADJ rows potentially used (2575/2576)
+is_adj_257x = (F.col("MEM_NAME") == "INDV_ELEMENTS_ADJ") & (F.col("ELEM_NBR").isin(2575, 2576))
 today_minus_43 = F.date_sub(F.current_date(), 43)
 df = df.withColumn(
     "IS_ELEM_DT_2X_DAYS",
-    F.when(F.col("ELEM_DT_2").isNotNull(), F.datediff(today_minus_43, F.to_date("ELEM_DT_2")))
+    F.when(is_adj_257x & F.col("ELEM_DT_2").isNotNull(),
+           F.datediff(today_minus_43, F.to_date("ELEM_DT_2")))
 )
 
-# -------- 2) Feature flags per INDV_ID (EXISTS / NOT EXISTS) --------
+# -------- 2) Feature flags (single agg) --------
 feat = (
     df.groupBy("INDV_ID").agg(
-
-        # $cdm : age in [6,12)
+        # age 6-12 exists
         F.max(F.when((F.col("AGE") >= 6) & (F.col("AGE") < 12), 1).otherwise(0)).alias("age_6_12_exists"),
-
-        # $pharm : elem_nbr=2563, mem_name="INDV_ELEMENTS_PHARM", ePdcNumeratorInDays>=210
-        F.max(F.when(
-            (F.col("ELEM_NBR") == 2563) &
-            (F.col("MEM_NAME") == "INDV_ELEMENTS_PHARM") &
-            (F.col("E_PDC_NUMERATOR_IN_DAYS") >= 210),
-            1).otherwise(0)
-        ).alias("pharm_exists"),
-
-        # exists( (continuousPeriod>=320 && continuity=="365D_Continuous") ||
-        #         (adjustedFinalDate>=320 && continuity=="365D_Continuous") )
+        # pharm exists
+        F.max(F.when(is_pharm & (F.col("ELEM_NBR") == 2563) & (F.col("E_PDC_NUMERATOR_IN_DAYS") >= 210), 1).otherwise(0)).alias("pharm_exists"),
+        # continuity gate
         F.max(F.when(
             ((F.col("CONTINUOUS_PERIOD") >= 320) & (F.col("CONTINUITY") == "365D_Continuous")) |
             ((F.col("ADJUSTED_FINAL_DATE") >= 320) & (F.col("CONTINUITY") == "365D_Continuous")),
-            1).otherwise(0)
-        ).alias("has_continuity_gate"),
-
-        # not( elem_nbr==3488 && ATTR_EG )
-        F.max(F.when(
-            (F.col("ELEM_NBR") == 3488) & (F.col("MEM_NAME") == "INDV_ELEMENTS_ATTR_EG"),
-            1).otherwise(0)
-        ).alias("has_forbidden_3488_attr_eg"),
-
-        # not( (2575 && ADJ && 0<=isElemDt2XDays<=365) || (2576 && ADJ && 0<=...<=365) )
-        F.max(F.when(
-            (
-                ((F.col("ELEM_NBR") == 2575) & (F.col("MEM_NAME") == "INDV_ELEMENTS_ADJ")) |
-                ((F.col("ELEM_NBR") == 2576) & (F.col("MEM_NAME") == "INDV_ELEMENTS_ADJ"))
-            ) &
-            (F.col("IS_ELEM_DT_2X_DAYS") >= 0) &
-            (F.col("IS_ELEM_DT_2X_DAYS") <= 365),
-            1).otherwise(0)
-        ).alias("has_forbidden_adj_window"),
-
-        # not( 3496 || 3159 || 3103  with ATTR_EG )
-        F.max(F.when(
-            (F.col("MEM_NAME") == "INDV_ELEMENTS_ATTR_EG") &
-            (F.col("ELEM_NBR").isin(3496, 3159, 3103)),
-            1).otherwise(0)
-        ).alias("has_forbidden_attr_eg_set")
+            1).otherwise(0)).alias("has_continuity_gate"),
+        # forbids
+        F.max(F.when((F.col("ELEM_NBR") == 3488) & (F.col("MEM_NAME") == "INDV_ELEMENTS_ATTR_EG"), 1).otherwise(0)).alias("forbid_3488_attr_eg"),
+        F.max(F.when(is_adj_257x &
+                     (F.col("IS_ELEM_DT_2X_DAYS") >= 0) & (F.col("IS_ELEM_DT_2X_DAYS") <= 365), 1).otherwise(0)).alias("forbid_adj_window"),
+        F.max(F.when((F.col("MEM_NAME") == "INDV_ELEMENTS_ATTR_EG") & (F.col("ELEM_NBR").isin(3496, 3159, 3103)), 1).otherwise(0)).alias("forbid_attr_eg_set")
     )
 )
 
-# -------- 3) Pick ONE $pharm row per INDV_ID for THEN logic --------
-pharm_rows = df.filter(
-    (F.col("ELEM_NBR") == 2563) &
-    (F.col("MEM_NAME") == "INDV_ELEMENTS_PHARM") &
-    (F.col("E_PDC_NUMERATOR_IN_DAYS") >= 210)
-).select("INDV_ID", "ELEM_SUP")
+# -------- 3) Pick ONE $pharm via max(struct(...)) (no Window shuffle) --------
+pharm_candidate = (
+    df.filter(is_pharm & (F.col("ELEM_NBR") == 2563) & (F.col("E_PDC_NUMERATOR_IN_DAYS") >= 210))
+      .select("INDV_ID", "ELEM_SUP")
+)
 
-# Prefer startsWith("PHARM 2"), tie-break by longest ELEM_SUP
-pharm_ranked = (pharm_rows
-                .withColumn("is_pharm2", F.col("ELEM_SUP").startswith("PHARM 2").cast("int"))
-                .withColumn("len_sup", F.length("ELEM_SUP")))
-w = Window.partitionBy("INDV_ID").orderBy(F.col("is_pharm2").desc(), F.col("len_sup").desc())
-pharm_one = (pharm_ranked
-             .withColumn("rn", F.row_number().over(w))
-             .filter("rn=1")
-             .drop("rn", "is_pharm2", "len_sup"))
+pharm_pick = (
+    pharm_candidate
+    .groupBy("INDV_ID")
+    .agg(
+        F.max(
+            F.struct(
+                F.col("ELEM_SUP").startswith("PHARM 2").cast("int").alias("is_p2"),
+                F.length("ELEM_SUP").alias("len_sup"),
+                F.col("ELEM_SUP").alias("val")
+            )
+        ).alias("mx")
+    )
+    .select("INDV_ID", F.col("mx.val").alias("ELEM_SUP"))
+)
 
-# -------- 4) THEN block (exact branches with "M" / "B") --------
-startsWithPharm2 = F.col("ELEM_SUP").isNotNull() & F.col("ELEM_SUP").startswith("PHARM 2")
+# -------- 4) THEN logic (exact branches) --------
+starts_p2 = F.col("ELEM_SUP").isNotNull() & F.col("ELEM_SUP").startswith("PHARM 2")
 len_ge_152 = (F.length("ELEM_SUP") >= 152)
 len_ge_131 = (F.length("ELEM_SUP") >= 131)
 
-# Java substring(a,b) -> Spark substring(a+1, b-a)
-# (93,103)->(94,10) ; (115,125)->(116,10) ; (114,115)->(115,1) ; (130,131)->(131,1)
-s93_103  = F.substring("ELEM_SUP", 94, 10)
-s115_125 = F.substring("ELEM_SUP", 116, 10)
+s93_103  = F.substring("ELEM_SUP", 94, 10)   # (93,103) java
+s115_125 = F.substring("ELEM_SUP", 116, 10)  # (115,125)
 flag115  = F.when(len_ge_131, F.substring("ELEM_SUP", 115, 1))
 flag131  = F.when(len_ge_131, F.substring("ELEM_SUP", 131, 1))
+digits   = lambda s: F.regexp_replace(s, r"[^0-9-]", "")
+to_num   = lambda s: F.when(F.length(digits(s)) > 0, digits(s).cast("double"))
 
-to_num = lambda s: F.when(F.length(F.regexp_replace(s, r"[^0-9-]", "")) > 0,
-                          F.regexp_replace(s, r"[^0-9-]", "").cast("double"))
-
-# score1 (len>=152)
 score1Desc = F.when(len_ge_152, F.lit("RXMD"))
 score1Nbr  = F.when(len_ge_152, to_num(s93_103))
 
-# score2/score3 (flags "M" / "B")
 score2Desc = F.when(flag115 == F.lit("M"), F.lit("MXRXMD")) \
               .when((flag115.isNotNull()) & (flag115 != F.lit("M")) & (flag115 != F.lit("B")) & (flag131 == F.lit("M")), F.lit("MXRXMD"))
 score2Nbr  = F.when(flag115 == F.lit("M"), to_num(s93_103)) \
@@ -146,28 +128,23 @@ score3Nbr  = F.when(flag115 == F.lit("B"), to_num(s93_103)) \
               .when((flag115.isNotNull()) & (flag115 != F.lit("M")) & (flag115 != F.lit("B")) & (flag131 == F.lit("B")), to_num(s115_125))
 
 then_cols = (
-    pharm_one
-    .withColumn("startsWithPharm2", startsWithPharm2)
+    pharm_pick
+    .withColumn("startsWithPharm2", starts_p2)
     .withColumn("score1Desc", score1Desc).withColumn("score1Nbr", score1Nbr)
     .withColumn("score2Desc", score2Desc).withColumn("score2Nbr", score2Nbr)
     .withColumn("score3Desc", score3Desc).withColumn("score3Nbr", score3Nbr)
-    .select("INDV_ID","startsWithPharm2","score1Desc","score1Nbr","score2Desc","score2Nbr","score3Desc","score3Nbr")
 )
 
-# -------- 5) Rule gates (all must pass) --------
+# -------- 5) Rule gates + STATUS --------
 rule_pass = (
     (F.col("age_6_12_exists") == 1) &
     (F.col("pharm_exists") == 1) &
     (F.col("has_continuity_gate") == 1) &
-    (F.col("has_forbidden_3488_attr_eg") == 0) &
-    (F.col("has_forbidden_adj_window") == 0) &
-    (F.col("has_forbidden_attr_eg_set") == 0)
+    (F.col("forbid_3488_attr_eg") == 0) &
+    (F.col("forbid_adj_window") == 0) &
+    (F.col("forbid_attr_eg_set") == 0)
 )
-
-# -------- 6) Build STATUS and emit --------
 joined = feat.join(then_cols, "INDV_ID", "left")
-
-# print "null" when any score field is null
 s = lambda c: F.when(F.col(c).isNotNull(), F.col(c).cast("string")).otherwise(F.lit("null"))
 
 status = F.concat_ws(
@@ -180,7 +157,7 @@ status = F.concat_ws(
 
 result = (
     joined
-    .filter(rule_pass & F.col("startsWithPharm2"))   # THEN guard: elem_sup startsWith("PHARM 2")
+    .filter(rule_pass & F.col("startsWithPharm2"))
     .select("INDV_ID", status.alias("STATUS"))
 )
 
