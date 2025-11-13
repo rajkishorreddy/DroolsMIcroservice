@@ -1,82 +1,33 @@
-from pyspark.sql import functions as F
+1. Reflecting on the goals you had for this year, what were your key accomplishments?
+After joining the team in June, I immediately began contributing to the CARE team and quickly ramped up on ongoing initiatives. I performed an end-to-end analysis of the Drools engine developed by the OAS team and documented the findings, which played a key role in guiding our architectural and design decisions.
+A major accomplishment was optimizing rules execution on Snowflake — reducing execution time from 40–50 minutes to under 3 minutes through database optimizations and multithreaded execution.
+I also developed a full-stack monolithic application using NetraAI (frontend) and FastAPI (backend), which was later demoed to leadership and received appreciation from Saurabh.
+Additionally, I explored executing Drools in Databricks as well as rule execution without Drools using PySpark, opening new avenues for performance improvement.
+Beyond development, I also collaborated with the A team to quickly gain knowledge on Kafka microservices, contributed to resolving issues, and mentored new joiners by sharing technical and functional knowledge across both CARE and A teams.
 
-raw = (spark.read.format("snowflake")
-       .options(**snowflake_options)
-       .option("query", """
-         SELECT INDV_ID, AGE, ELEM_NBR, MEM_NAME, ELEM_SUP,
-                GRACE_PERIOD, CONTINUITY,
-                EFFECTIVE_DATE, MAX_END_DATE, FINAL_END_DATE, MIN_EFF_DATE,
-                ELEM_DT_2
-         FROM ELEMENT_DATA_TABLE_KIS
-       """)
-       .load())
+2. What challenges did you face and how did you develop?
+One of the key challenges was understanding and optimizing the complex Drools + Snowflake execution framework, which required deep dives into both the codebase and data processing workflows. Through this, I enhanced my skills in performance tuning, parallel processing, and distributed data systems.
+Another challenge was transitioning into new technologies and teams simultaneously, but by proactively collaborating with cross-functional teams and self-learning, I was able to gain expertise in Kafka, Databricks, and FastAPI in a short time.
+These experiences improved my problem-solving ability, technical adaptability, and end-to-end ownership in delivering high-impact solutions.
 
-# Derived columns only when relevant
-is_pharm = (F.col("MEM_NAME") == "INDV_ELEMENTS_PHARM")
-has_p2   = F.col("ELEM_SUP").isNotNull() & F.col("ELEM_SUP").startswith("PHARM 2") & (F.length("ELEM_SUP") > 18)
-pdc_slice = F.when(is_pharm & has_p2, F.substring("ELEM_SUP", 16, 3))
-raw = raw.withColumn("CONTINUOUS_PERIOD", F.col("GRACE_PERIOD")) \
-         .withColumn("E_PDC_NUMERATOR_IN_DAYS",
-                     F.when(pdc_slice.isNotNull(), F.regexp_replace(pdc_slice, r"[^0-9-]", "").cast("int"))) \
-         .withColumn("ADJUSTED_FINAL_DATE",
-                     F.when((F.col("CONTINUITY")=="365D_Continuous") &
-                            F.col("EFFECTIVE_DATE").isNotNull() & F.col("MAX_END_DATE").isNotNull() &
-                            (F.col("EFFECTIVE_DATE") > F.col("MAX_END_DATE")) &
-                            F.col("FINAL_END_DATE").isNotNull() & F.col("MIN_EFF_DATE").isNotNull(),
-                            F.datediff("FINAL_END_DATE","MIN_EFF_DATE"))) \
-         .withColumn("IS_ELEM_DT_2X_DAYS",
-                     F.when((F.col("MEM_NAME")=="INDV_ELEMENTS_ADJ") & (F.col("ELEM_NBR").isin(2575,2576)) &
-                            F.col("ELEM_DT_2").isNotNull(),
-                            F.datediff(F.date_sub(F.current_date(),43), F.to_date("ELEM_DT_2"))))
+3. What do you want to continue to work towards in the coming year?
+In the coming year, I aim to:
 
-# Pick ONE pharm per INDV_ID (no Window)
-pharm_pick = (raw.filter(is_pharm & (F.col("ELEM_NBR")==2563) & (F.col("E_PDC_NUMERATOR_IN_DAYS")>=210))
-                .groupBy("INDV_ID")
-                .agg(F.max(F.struct(
-                        F.col("ELEM_SUP").startswith("PHARM 2").cast("int").alias("is_p2"),
-                        F.length("ELEM_SUP").alias("len_sup"),
-                        F.col("ELEM_SUP").alias("pharm_elem_sup")
-                    )).alias("mx"))
-                .select("INDV_ID", F.col("mx.pharm_elem_sup").alias("PHARM_ELEM_SUP")))
 
-# Aggregate reusable features (single shuffle)
-feat = (raw.groupBy("INDV_ID").agg(
-          F.max(F.when((F.col("AGE")>=6)&(F.col("AGE")<12),1).otherwise(0)).alias("age_6_12_exists"),
-          F.max(F.when(is_pharm & (F.col("ELEM_NBR")==2563) & (F.col("E_PDC_NUMERATOR_IN_DAYS")>=210),1).otherwise(0)).alias("pharm_exists"),
-          F.max(F.when(((F.col("CONTINUOUS_PERIOD")>=320)&(F.col("CONTINUITY")=="365D_Continuous")) |
-                       ((F.col("ADJUSTED_FINAL_DATE")>=320)&(F.col("CONTINUITY")=="365D_Continuous")),1).otherwise(0)).alias("has_continuity_gate"),
-          F.max(F.when((F.col("ELEM_NBR")==3488)&(F.col("MEM_NAME")=="INDV_ELEMENTS_ATTR_EG"),1).otherwise(0)).alias("forbid_3488_attr_eg"),
-          F.max(F.when((F.col("MEM_NAME")=="INDV_ELEMENTS_ADJ")&(F.col("ELEM_NBR").isin(2575,2576))&
-                       (F.col("IS_ELEM_DT_2X_DAYS")>=0)&(F.col("IS_ELEM_DT_2X_DAYS")<=365),1).otherwise(0)).alias("forbid_adj_window"),
-          F.max(F.when((F.col("MEM_NAME")=="INDV_ELEMENTS_ATTR_EG")&(F.col("ELEM_NBR").isin(3496,3159,3103)),1).otherwise(0)).alias("forbid_attr_eg_set")
-       ))
+Strengthen the Databricks-based execution framework to support large-scale, high-performance rule processing.
 
-features = feat.join(pharm_pick, "INDV_ID", "left") \
-               .withColumn("run_date", F.current_date())
 
-# Write once; reuse for many rules
-(features
- .write.mode("overwrite")  # or "append" with partitionBy
- .format("delta")
- .partitionBy("run_date")
- .saveAsTable("feature_store.features_indv"))
+Contribute to modernization efforts by enhancing automation, monitoring, and observability within our data pipelines and rule engines.
+
+
+Explore AI/ML integration for intelligent decisioning within our rule execution framework.
+
+
+Continue to mentor new team members and enhance collaboration across teams to accelerate delivery.
+
+
+Grow towards a tech lead role, focusing on architectural design and system scalability.
 
 
 
-
-
-
-
-
-
-from pyspark.sql import functions as F
-
-feat = spark.table("feature_store.features_indv").where("run_date = current_date()")
-
-# Evaluate ADHD and DIMAST0051 (example)
-rules = {
-  "DIMAST0051": ( (F.col("has_3018_ATTR_EG")==1) & (F.col("has_1125_EBM")==1) & (F.col("has_complex_A")==1) & (F.col("forbid_3019")==0) ),
-  "TPOBEH001":  ( (F.col("age_6_12_exists")==1) & (F.col("pharm_exists")==1) & (F.col("has_continuity_gate")==1) &
-                  (F.col("forbid_3488_attr_eg")==0) & (F.col("forbid_adj_window")==0) & (F.col("forbid_attr_eg_set")==0) )
-}
-# Build the ADHD THEN output off PHARM_ELEM_SUP only for those that pass
+Would you like me to make it slightly more concise and formal (for official HR portal submission) or keep it as is (detailed and narrative)?
