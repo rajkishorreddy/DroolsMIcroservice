@@ -1,33 +1,8 @@
-1. Reflecting on the goals you had for this year, what were your key accomplishments?
-After joining the team in June, I immediately began contributing to the CARE team and quickly ramped up on ongoing initiatives. I performed an end-to-end analysis of the Drools engine developed by the OAS team and documented the findings, which played a key role in guiding our architectural and design decisions.
-A major accomplishment was optimizing rules execution on Snowflake — reducing execution time from 40–50 minutes to under 3 minutes through database optimizations and multithreaded execution.
-I also developed a full-stack monolithic application using NetraAI (frontend) and FastAPI (backend), which was later demoed to leadership and received appreciation from Saurabh.
-Additionally, I explored executing Drools in Databricks as well as rule execution without Drools using PySpark, opening new avenues for performance improvement.
-Beyond development, I also collaborated with the A team to quickly gain knowledge on Kafka microservices, contributed to resolving issues, and mentored new joiners by sharing technical and functional knowledge across both CARE and A teams.
-
-2. What challenges did you face and how did you develop?
-One of the key challenges was understanding and optimizing the complex Drools + Snowflake execution framework, which required deep dives into both the codebase and data processing workflows. Through this, I enhanced my skills in performance tuning, parallel processing, and distributed data systems.
-Another challenge was transitioning into new technologies and teams simultaneously, but by proactively collaborating with cross-functional teams and self-learning, I was able to gain expertise in Kafka, Databricks, and FastAPI in a short time.
-These experiences improved my problem-solving ability, technical adaptability, and end-to-end ownership in delivering high-impact solutions.
-
-3. What do you want to continue to work towards in the coming year?
-In the coming year, I aim to:
-
-
-Strengthen the Databricks-based execution framework to support large-scale, high-performance rule processing.
-
-
-Contribute to modernization efforts by enhancing automation, monitoring, and observability within our data pipelines and rule engines.
-
-
-Explore AI/ML integration for intelligent decisioning within our rule execution framework.
-
-
-Continue to mentor new team members and enhance collaboration across teams to accelerate delivery.
-
-
-Grow towards a tech lead role, focusing on architectural design and system scalability.
-
-
-
-Would you like me to make it slightly more concise and formal (for official HR portal submission) or keep it as is (detailed and narrative)?
+kafka-consumer-groups \
+  --bootstrap-server eligibility-cdb-non-prod-kafka-1-client.svc.prod-us.gcp.extscloud.com:16621,eligibility-cdb-non-prod-kafka-2-client.svc.prod-us.gcp.extscloud.com:16621 \
+  --group <YOUR_GROUP_ID> \
+  --topic evr.cdb.systest-alpha.data.eligibility.eligibility.v3-14 \
+  --reset-offsets \
+  --to-earliest \
+  --execute \
+  --command-config ~/secrets/kafka/client.properties
