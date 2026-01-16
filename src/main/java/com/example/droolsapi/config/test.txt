@@ -1,2 +1,1 @@
-kafka-consumer-groups --bootstrap-server <broker> --group <group> --describe \
-| awk 'NR>1 {sum += $5} END {print "TOTAL_PENDING_MESSAGES(LAG) =", sum}'
+kafka-consumer-groups --bootstrap-server eligibility-cdb-prod-kafka-0-client.cdb.svc.prod1-us-east1.gke.kaas-prod-us.gcp.extcloud.com:9093 --group <YOUR_CONSUMER_GROUP> --command-config /secrets/kafka/client.properties --describe | awk 'NR>1 {sum += $3} END {print sum}'
