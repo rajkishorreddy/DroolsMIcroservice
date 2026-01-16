@@ -1,12 +1,4 @@
 select
-  SRC_REC_PARTN,
-  SRC_REC_OFST,
-  count(*) as times_loaded,
-  min(DW_CREAT_DTTM) as first_seen,
-  max(DW_CREAT_DTTM) as last_seen
-from <YOUR_TABLE>
-where DW_CREAT_DTTM >= dateadd(minute, -30, current_timestamp())
-group by 1,2
-having count(*) > 1
-order by times_loaded desc
-limit 50;
+  count(*) as total_rows,
+  count(distinct sha2(to_varchar(object_construct(*)), 256)) as distinct_rows
+from DW_CDB_ELIG;
