@@ -1,4 +1,2 @@
-select
-  count(*) as total_rows,
-  count(distinct sha2(to_varchar(object_construct(*)), 256)) as distinct_rows
-from DW_CDB_ELIG;
+kafka-consumer-groups --bootstrap-server <broker> --group <group> --describe \
+| awk 'NR>1 {sum += $5} END {print "TOTAL_PENDING_MESSAGES(LAG) =", sum}'
