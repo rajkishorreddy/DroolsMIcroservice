@@ -1,8 +1,6 @@
-kafka-consumer-groups \
-  --bootstrap-server eligibility-cdb-non-prod-kafka-1-client.svc.prod-us.gcp.extscloud.com:16621,eligibility-cdb-non-prod-kafka-2-client.svc.prod-us.gcp.extscloud.com:16621 \
-  --group <YOUR_GROUP_ID> \
-  --topic evr.cdb.systest-alpha.data.eligibility.eligibility.v3-14 \
-  --reset-offsets \
-  --to-earliest \
-  --execute \
-  --command-config ~/secrets/kafka/client.properties
+select
+  count(*) as total_rows,
+  count(distinct to_varchar(SRC_REC_PARTN) || ':' || to_varchar(SRC_REC_OFST)) as unique_rows,
+  count(*) - count(distinct to_varchar(SRC_REC_PARTN) || ':' || to_varchar(SRC_REC_OFST)) as duplicate_rows
+from <your_table>
+where DW_CREAT_DTTM >= dateadd(minute, -5, current_timestamp());
