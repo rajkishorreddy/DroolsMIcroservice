@@ -1,6 +1,12 @@
 select
-  count(*) as total_rows,
-  count(distinct to_varchar(SRC_REC_PARTN) || ':' || to_varchar(SRC_REC_OFST)) as unique_rows,
-  count(*) - count(distinct to_varchar(SRC_REC_PARTN) || ':' || to_varchar(SRC_REC_OFST)) as duplicate_rows
-from <your_table>
-where DW_CREAT_DTTM >= dateadd(minute, -5, current_timestamp());
+  SRC_REC_PARTN,
+  SRC_REC_OFST,
+  count(*) as times_loaded,
+  min(DW_CREAT_DTTM) as first_seen,
+  max(DW_CREAT_DTTM) as last_seen
+from <YOUR_TABLE>
+where DW_CREAT_DTTM >= dateadd(minute, -30, current_timestamp())
+group by 1,2
+having count(*) > 1
+order by times_loaded desc
+limit 50;
