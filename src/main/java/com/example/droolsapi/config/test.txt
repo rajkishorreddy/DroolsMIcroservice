@@ -1,1 +1,7 @@
-kafka-consumer-groups --bootstrap-server eligibility-cdb-prod-kafka-0-client.cdb.svc.prod1-us-east1.gke.kaas-prod-us.gcp.extcloud.com:9093 --group <YOUR_CONSUMER_GROUP> --command-config /secrets/kafka/client.properties --describe | awk 'NR>1 {sum += $3} END {print sum}'
+RUN --mount=type=secret,id=jf-user,env=JF_USER \
+    --mount=type=secret,id=jf-token,env=JF_TOKEN \
+    set -eux; \
+    printf "machine centraluhg.jfrog.io\nlogin %s\npassword %s\n" "$JF_USER" "$JF_TOKEN" > /root/.netrc; \
+    chmod 600 /root/.netrc; \
+    pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" -r requirements.txt; \
+    rm -f /root/.netrc
